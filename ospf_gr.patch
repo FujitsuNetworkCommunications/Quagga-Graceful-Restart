@@ -1,1 +1,2059 @@
+diff -burN baseline/quagga-0.99.24.1/ospfd/Makefile.am baseline_quagga/quagga-0.99.24.1/ospfd/Makefile.am
+--- baseline/quagga-0.99.24.1/ospfd/Makefile.am 2016-07-25 07:07:59.352717000 -0500
++++ baseline_quagga/quagga-0.99.24.1/ospfd/Makefile.am  2016-07-26 00:11:54.527031000 -0500
+@@ -14,13 +14,13 @@
+        ospf_nsm.c ospf_dump.c ospf_network.c ospf_packet.c ospf_lsa.c \
+        ospf_spf.c ospf_route.c ospf_ase.c ospf_abr.c ospf_ia.c ospf_flood.c \
+        ospf_lsdb.c ospf_asbr.c ospf_routemap.c ospf_snmp.c \
+-       ospf_opaque.c ospf_te.c ospf_vty.c ospf_api.c ospf_apiserver.c
++       ospf_opaque.c ospf_te.c ospf_gr.c ospf_vty.c ospf_api.c ospf_apiserver.c
+
+ ospfdheaderdir = $(pkgincludedir)/ospfd
+
+ ospfdheader_HEADERS = \
+        ospf_api.h ospf_asbr.h ospf_dump.h ospf_lsa.h ospf_lsdb.h \
+-       ospf_nsm.h ospf_ism.h ospf_opaque.h ospfd.h
++       ospf_nsm.h ospf_ism.h ospf_opaque.h ospf_gr.h ospfd.h
+
+ noinst_HEADERS = \
+        ospf_interface.h ospf_neighbor.h ospf_network.h ospf_packet.h \
+
+diff -burN baseline/quagga-0.99.24.1/ospfd/ospfd.c baseline_quagga/quagga-0.99.24.1/ospfd/ospfd.c
+--- baseline/quagga-0.99.24.1/ospfd/ospfd.c     2016-07-25 07:07:59.432715000 -0500
++++ baseline_quagga/quagga-0.99.24.1/ospfd/ospfd.c      2016-07-26 05:02:10.412898000 -0500
+@@ -52,7 +52,7 @@
+ #include "ospfd/ospf_flood.h"
+ #include "ospfd/ospf_route.h"
+ #include "ospfd/ospf_ase.h"
+-
++#include "ospfd/ospf_gr.h"
+
+
+ /* OSPF process wide configuration. */
+@@ -77,6 +77,19 @@
+
+ #define OSPF_EXTERNAL_LSA_ORIGINATE_DELAY 1
+
++
++void
++ospf_set_gr_restart (void)
++{
++  SET_FLAG (om->options, OSPF_GR_RESTART_IN_PROGRESS);
++}
++
++void
++ospf_unset_gr_restart (void)
++{
++  UNSET_FLAG (om->options, OSPF_GR_RESTART_IN_PROGRESS);
++}
++
+ void
+ ospf_router_id_update (struct ospf *ospf)
+ {
+@@ -184,6 +197,9 @@
+   new->stub_router_shutdown_time = OSPF_STUB_ROUTER_UNCONFIGURED;
+   new->stub_router_admin_set     = OSPF_STUB_ROUTER_ADMINISTRATIVE_UNSET;
+
++#ifdef SUPPORT_GRACE_RESTART
++ SET_FLAG (new->config, OSPF_OPAQUE_CAPABLE);
++#endif
+   /* Distribute parameter init. */
+   for (i = 0; i <= ZEBRA_ROUTE_MAX; i++)
+     {
+@@ -275,6 +291,9 @@
+ #ifdef HAVE_OPAQUE_LSA
+       ospf_opaque_type11_lsa_init (ospf);
+ #endif /* HAVE_OPAQUE_LSA */
++#ifdef SUPPORT_GRACE_RESTART
++      ospf_gr_init_global_info(ospf);
++#endif
+     }
+
+   return ospf;
+@@ -355,6 +374,20 @@
+   return;
+ }
+
++static int
++ospf_deferred_gr_shutdown_timer (struct thread *t)
++{
++  struct ospf *ospf = THREAD_ARG(t);
++
++  OSPF_TIMER_OFF (ospf->t_deferred_shutdown);
++  ospf_finish_final(ospf);
++
++  if (listcount (om->ospf) == 0)
++    exit (0);
++
++  return 0;
++}
++
+ /* Shut down the entire process */
+ void
+ ospf_terminate (void)
+@@ -363,10 +396,13 @@
+   struct listnode *node, *nnode;
+
+   /* shutdown already in progress */
+-  if (CHECK_FLAG (om->options, OSPF_MASTER_SHUTDOWN))
++  if (
++#ifdef SUPPORT_GRACE_RESTART
++      CHECK_FLAG (om->options, OSPF_GR_SHUTDOWN_IN_PROGRESS) ||
++#endif
++      CHECK_FLAG (om->options, OSPF_MASTER_SHUTDOWN))
+     return;
+
+-  SET_FLAG (om->options, OSPF_MASTER_SHUTDOWN);
+
+   /* exit immediately if OSPF not actually running */
+   if (listcount(om->ospf) == 0)
+@@ -379,14 +415,49 @@
+    * One or more ospf_finish()'s may have deferred shutdown to a timer
+    * thread
+    */
++#ifdef SUPPORT_GRACE_RESTART
++  if (CHECK_FLAG (om->options, OSPF_GR_SHUTDOWN_IN_PROGRESS)) {
++    ospf_gr_write_state_info(1);
++  }
++  else
++#endif
++    ospf_gr_write_state_info(0);
++}
++
++static void
++ospf_gr_finish (struct ospf *ospf)
++{
++  struct listnode *node, *nnode;
++  struct ospf_interface *oi;
++
++  for (ALL_LIST_ELEMENTS (ospf->oiflist, node, nnode, oi)) {
++#ifdef HAVE_OPAQUE_LSA
++    /*Originate type9 LSA*/
++    oi->ospf->gr_info.gr_exit_reason = OSPF_GR_NONE;
++    ospf_gr_lsa_originate(oi);
++#endif /* HAVE_OPAQUE_LSA */
++  }
++
++  OSPF_TIMER_ON (ospf->t_deferred_gr_shutdown, ospf_deferred_gr_shutdown_timer,
++                 OSPF_GR_SHUTDOWN_DELAY);
+ }
+
+ void
+ ospf_finish (struct ospf *ospf)
+ {
++
++#ifdef SUPPORT_GRACE_RESTART
++  if (ospf->gr_info.gr_enable == TRUE) {
++    SET_FLAG (om->options, OSPF_GR_SHUTDOWN_IN_PROGRESS);
++    ospf_gr_finish(ospf);
++  }
++  else
++#endif
++    {
++      SET_FLAG (om->options, OSPF_MASTER_SHUTDOWN);
+   /* let deferred shutdown decide */
+   ospf_deferred_shutdown_check (ospf);
+-
++    }
+   /* if ospf_deferred_shutdown returns, then ospf_finish_final is
+    * deferred to expiry of G-S timer thread. Return back up, hopefully
+    * to thread scheduler.
+@@ -394,6 +465,7 @@
+   return;
+ }
+
++
+ /* Final cleanup of ospf instance */
+ static void
+ ospf_finish_final (struct ospf *ospf)
+diff -burN baseline/quagga-0.99.24.1/ospfd/ospfd.h baseline_quagga/quagga-0.99.24.1/ospfd/ospfd.h
+--- baseline/quagga-0.99.24.1/ospfd/ospfd.h     2016-07-25 07:07:59.434714000 -0500
++++ baseline_quagga/quagga-0.99.24.1/ospfd/ospfd.h      2016-07-25 06:43:54.945830000 -0500
+@@ -29,6 +29,10 @@
+ #include "filter.h"
+ #include "log.h"
+
++#ifdef SUPPORT_GRACE_RESTART
++#include "ospfd/ospf_gr.h"
++#endif
++
+ #define OSPF_VERSION            2
+
+ /* VTY port number. */
+@@ -76,6 +80,11 @@
+ #define OSPF_LS_REFRESH_SHIFT       (60 * 15)
+ #define OSPF_LS_REFRESH_JITTER      60
+
++/*ospf graceful restart states*/
++
++#define OSPF_GR_ON_GOING  1
++#define OSPF_NORMAL_START 2
++
+ /* OSPF master for system wide configuration and variables. */
+ struct ospf_master
+ {
+@@ -98,6 +107,10 @@
+   /* Various OSPF global configuration. */
+   u_char options;
+ #define OSPF_MASTER_SHUTDOWN (1 << 0) /* deferred-shutdown */
++#define OSPF_GR_SHUTDOWN_IN_PROGRESS (1 << 1) /*Graceful-shutdown*/
++#define OSPF_GR_RESTART_IN_PROGRESS (1 << 2) /*Graceful restart in progress*/
++
++  struct thread *restart_status_t;
+ };
+
+ /* OSPF instance structure. */
+@@ -217,6 +230,7 @@
+   struct thread *t_maxage_walker;       /* MaxAge LSA checking timer. */
+
+   struct thread *t_deferred_shutdown;  /* deferred/stub-router shutdown timer*/
++  struct thread *t_deferred_gr_shutdown; /*Deferred shutdown after install grace lsa*/
+
+   struct thread *t_write;
+   struct thread *t_read;
+@@ -280,6 +294,9 @@
+   u_int32_t rx_lsa_count;
+
+   struct route_table *distance_table;
++#ifdef SUPPORT_GRACE_RESTART
++  struct ospf_gr_info gr_info;
++#endif
+ };
+
+ /* OSPF area structure. */
+@@ -405,6 +422,7 @@
+   u_int32_t act_ints;          /* Active interfaces. */
+   u_int32_t full_nbrs;         /* Fully adjacent neighbors. */
+   u_int32_t full_vls;          /* Fully adjacent virtual neighbors. */
++
+ };
+
+ /* OSPF config network structure. */
+@@ -567,4 +585,7 @@
+
+ extern void ospf_master_init (void);
+
++extern void ospf_set_gr_restart (void);
++
++extern void ospf_unset_gr_restart (void);
+ #endif /* _ZEBRA_OSPFD_H */
+diff -burN baseline/quagga-0.99.24.1/ospfd/ospf_flood.c baseline_quagga/quagga-0.99.24.1/ospfd/ospf_flood.c
+--- baseline/quagga-0.99.24.1/ospfd/ospf_flood.c        2016-07-25 07:07:59.371717000 -0500
++++ baseline_quagga/quagga-0.99.24.1/ospfd/ospf_flood.c 2016-07-25 04:54:50.095594000 -0500
+@@ -356,6 +356,11 @@
+               IF_NAME (oi), inbr ? inet_ntoa (inbr->router_id) : "NULL",
+                dump_lsa_key (lsa));
+
++#ifdef SUPPORT_GRACE_RESTART
++  if (ospf_gr_is_going() && !inbr)
++    return 0;
++#endif
++
+   if (!ospf_if_is_enable (oi))
+     return 0;
+
+diff -burN baseline/quagga-0.99.24.1/ospfd/ospf_flood.h baseline_quagga/quagga-0.99.24.1/ospfd/ospf_flood.h
+--- baseline/quagga-0.99.24.1/ospfd/ospf_flood.h        2016-07-25 07:07:59.373717000 -0500
++++ baseline_quagga/quagga-0.99.24.1/ospfd/ospf_flood.h 2016-07-25 04:56:55.917026000 -0500
+@@ -70,5 +70,7 @@
+ extern struct external_info *ospf_external_info_check (struct ospf_lsa *);
+
+ extern void ospf_lsdb_init (struct ospf_lsdb *);
+-
++#ifdef SUPPORT_GRACE_RESTART
++extern int ospf_gr_is_going (void);
++#endif
+ #endif /* _ZEBRA_OSPF_FLOOD_H */
+diff -burN baseline/quagga-0.99.24.1/ospfd/ospf_gr.c baseline_quagga/quagga-0.99.24.1/ospfd/ospf_gr.c
+--- baseline/quagga-0.99.24.1/ospfd/ospf_gr.c   1969-12-31 18:00:00.000000000 -0600
++++ baseline_quagga/quagga-0.99.24.1/ospfd/ospf_gr.c    2016-07-26 05:01:14.434599000 -0500
+@@ -0,0 +1,1084 @@
++#include <stdbool.h>
++#include <zebra.h>
++
++#include "thread.h"
++#include "memory.h"
++#include "prefix.h"
++#include "table.h"
++#include "stream.h"
++#include "table.h"
++#include "log.h"
++
++#include "ospfd/ospfd.h"
++#include "ospfd/ospf_interface.h"
++#include "ospfd/ospf_ism.h"
++#include "ospfd/ospf_asbr.h"
++#include "ospfd/ospf_lsa.h"
++#include "ospfd/ospf_lsdb.h"
++#include "ospfd/ospf_neighbor.h"
++#include "ospfd/ospf_nsm.h"
++#include "ospfd/ospf_packet.h"
++#include "ospfd/ospf_dump.h"
++#include "ospfd/ospf_flood.h"
++#include "ospfd/ospf_gr.h"
++
++#define MTYPE_OSPF_GR_IF 0
++
++enum rsm {
++  RSM_GrResInProgress = 1,
++  RSM_GrResOK,
++  RSM_GrResNOK,
++  RSM_GrResMax,
++};
++
++#define GRACEFULE_RESTART_CONFIG "graceful_restart.conf"
++
++#define Hlpr_Idle 0
++#define Hlpr_InProgress 1
++#define Hlpr_Completed 2
++
++#define OSPF_RSM_SM_MONITOR_INTERVAL 10
++
++
++enum ospf_gr_event {
++  RSM_GrExtend,
++  RSM_GrExpiry,
++  RSM_GrIntAdjComplete,
++  RSM_GrNbrInconsistent,
++  RSM_GrNoNbr,
++};
++
++int gr_restart_rsn = GR_REASON_UNKNOWN;
++int helper_enable = TRUE;
++
++static char config_default[] = SYSCONFDIR GRACEFULE_RESTART_CONFIG;
++
++int
++ospf_gr_get_restart_age (struct ospf *ospf)
++{
++  int age;
++
++  if (ospf->gr_info.gr_status != OSPF_GR_NOT_RESTART) {
++    if ((age = (ospf->gr_info.grace_period -
++                (tv_floor (tv_sub (recent_relative_time (), ospf->gr_info.start_time))))) > 0)
++      return age;
++  }
++  return 0;
++}
++
++int
++ospf_gr_get_helper_age (struct ospf_neighbor *nbr)
++{
++  int age;
++
++  if (nbr->gr_helper.helper_status == OSPF_GR_HELPING) {
++    if ((age = (nbr->gr_helper.grace_period -
++                (tv_floor (tv_sub (recent_relative_time (), nbr->gr_helper.start_time))))) > 0)
++      return age;
++  }
++  return 0;
++}
++
++void
++ospf_gr_init_helper_info (struct ospf_gr_nbr_info *helper_info)
++{
++  if (!helper_info) {
++    zlog_warn ("Invalid Graceful Restart helper info.");
++    return;
++  }
++
++  helper_info->helper_status = OSPF_GR_NOT_HELPING;
++  helper_info->start_time.tv_sec = 0;
++  helper_info->start_time.tv_usec = 0;
++  helper_info->helper_exit_rsn = OSPF_GR_NONE;
++  helper_info->grace_period = 0;
++  helper_info->t_adja_check = NULL;
++}
++
++void
++ospf_gr_init_global_info (struct ospf* ospf)
++{
++  if (CHECK_FLAG (om->options, OSPF_GR_RESTART_IN_PROGRESS)) {
++    ospf->gr_info.gr_enable = FALSE;
++    ospf->gr_info.gr_status = OSPF_GR_PLANNED_RESTART;
++    ospf->gr_info.start_time = recent_relative_time();
++    ospf->gr_info.gr_exit_reason = OSPF_GR_IN_PROGRESS;
++  } else {
++    ospf->gr_info.gr_status = OSPF_GR_NOT_RESTART;
++    ospf->gr_info.start_time.tv_sec = 0;
++    ospf->gr_info.start_time.tv_usec = 0;
++    ospf->gr_info.gr_exit_reason = OSPF_GR_NONE;
++  }
++  ospf->gr_info.gr_enable = FALSE;
++  ospf->gr_info.grace_period = 0;
++  ospf->gr_info.strict_lsa_check = FALSE;
++  ospf->gr_info.gr_expiry_t = NULL;
++}
++
++static void
++ospf_gr_parse_grace_lsa (struct lsa_header *lsah,
++                         u_int32_t *grace_period,
++                         struct in_addr *if_addr,
++                         uint8_t *reason)
++{
++  struct ospf_grace_tlv_header *tlvh;
++  struct ospf_grace_tlv_grace_period *grace_period_tlv;
++  struct ospf_grace_tlv_restart_reason *grace_rst_rsn_tlv;
++  struct ospf_grace_tlv_interface_addr *if_addr_tlv;
++  u_int16_t sum, total;
++
++  if (!lsah)
++    return;
++
++  sum = 0;
++  total = ntohs (lsah->length) - OSPF_LSA_HEADER_SIZE;
++
++  for (tlvh = OSPF_GRACE_TLV_HDR_TOP (lsah); sum < total;
++       tlvh = OSPF_GRACE_TLV_HDR_NEXT (tlvh)) {
++
++    sum += OSPF_GRACE_TLV_SIZE(tlvh);
++
++    switch (ntohs(tlvh->type)) {
++    case OSPF_GRACE_TLV_GRACE_PERIOD:
++      grace_period_tlv = (struct ospf_grace_tlv_grace_period*)tlvh;
++      *grace_period = ntohl(grace_period_tlv->value);
++      break;
++    case OSPF_GRACE_TLV_RESTART_REASON:
++      grace_rst_rsn_tlv = (struct ospf_grace_tlv_restart_reason*)tlvh;
++      *reason = grace_rst_rsn_tlv->value;
++      break;
++    case OSPF_GRACE_TLV_INTERFACE_ADDR:
++      if_addr_tlv = (struct ospf_grace_tlv_interface_addr*)tlvh;
++      if_addr->s_addr = if_addr_tlv->value.s_addr;
++      break;
++    default:
++      break;
++    }
++  }
++  return;
++}
++
++static void
++ospf_gr_build_grace_tlv_header (struct stream *s, struct ospf_grace_tlv_header *tlvh)
++{
++  stream_put (s, tlvh, sizeof (struct ospf_grace_tlv_header));
++  return;
++}
++
++static void
++ospf_gr_grace_period_tlv (struct stream *s, struct ospf_interface *oi)
++{
++  struct ospf_grace_tlv_grace_period grace_period;;
++
++  memset(&grace_period, '\0', sizeof(struct ospf_grace_tlv_grace_period));
++
++  grace_period.header.type = htons(OSPF_GRACE_TLV_GRACE_PERIOD);
++  grace_period.header.length = htons (sizeof (u_int32_t));
++  grace_period.value = htonl(oi->ospf->gr_info.grace_period);
++
++  ospf_gr_build_grace_tlv_header (s, &grace_period.header);
++  stream_put (s, (&grace_period.header)+1, OSPF_GRACE_TLV_BODY_SIZE (&grace_period.header));
++  return;
++}
++
++static void
++ospf_gr_grace_restart_reason_tlv (struct stream *s, struct ospf_interface *oi)
++{
++  struct ospf_grace_tlv_restart_reason gr_reason;;
++
++  memset(&gr_reason, '\0', sizeof(struct ospf_grace_tlv_restart_reason));
++
++  gr_reason.header.type = htons(OSPF_GRACE_TLV_RESTART_REASON);
++  gr_reason.header.length = htons(sizeof(char));
++  gr_reason.value = gr_restart_rsn;
++  ospf_gr_build_grace_tlv_header (s, &gr_reason.header);
++  stream_put (s, (&gr_reason.header)+1, OSPF_GRACE_TLV_BODY_SIZE (&gr_reason.header));
++  return;
++}
++
++static void
++ospf_gr_grace_if_addr_tlv (struct stream *s, struct ospf_interface *oi)
++{
++  struct ospf_grace_tlv_interface_addr if_addr;
++  struct prefix_ipv4 *prfx = (struct prefix_ipv4*)oi->address;
++
++  if_addr.header.type = htons(OSPF_GRACE_TLV_INTERFACE_ADDR);
++  if_addr.header.length = htons (sizeof (struct in_addr));
++  if_addr.value.s_addr = prfx->prefix.s_addr;
++
++  ospf_gr_build_grace_tlv_header (s, &if_addr.header);
++  stream_put (s, (&if_addr.header)+1, OSPF_GRACE_TLV_BODY_SIZE (&if_addr.header));
++  return;
++}
++
++static void
++ospf_gr_lsa_body_set (struct stream *s, struct ospf_interface *oi)
++{
++  ospf_gr_grace_period_tlv(s, oi);
++  ospf_gr_grace_restart_reason_tlv(s, oi);
++  ospf_gr_grace_if_addr_tlv(s, oi);
++}
++
++static struct ospf_lsa *
++ospf_gr_lsa_new (struct ospf_area *area, struct ospf_interface *oi)
++{
++  struct stream *s;
++  struct lsa_header *lsah;
++  struct ospf_lsa *new = NULL;
++  u_char options, lsa_type;
++  struct in_addr lsa_id;
++  u_int32_t tmp;
++  u_int16_t length;
++
++
++  /* Create a stream for LSA. */
++  if ((s = stream_new (OSPF_MAX_LSA_SIZE)) == NULL) {
++    zlog_warn ("ospf_gr_lsa_new: stream_new() ?");
++    goto out;
++  }
++
++  lsah = (struct lsa_header *) STREAM_DATA (s);
++
++  options  = LSA_OPTIONS_GET (area);
++  options |= LSA_OPTIONS_NSSA_GET (area);
++  options |= OSPF_OPTION_O;
++
++  lsa_type = OSPF_OPAQUE_LINK_LSA;
++  tmp = SET_OPAQUE_LSID (OPAQUE_TYPE_GRACE_LSA, 0);
++  lsa_id.s_addr = htonl (tmp);
++
++  if (IS_DEBUG_OSPF (lsa, LSA_GENERATE))
++    zlog_debug ("LSA[Type%d:%s]: Create an Opaque-LSA/Graceful Restart", lsa_type, inet_ntoa (lsa_id));
++
++  /* Set opaque-LSA header fields. */
++  lsa_header_set (s, options, lsa_type, lsa_id, area->ospf->router_id);
++
++  /* Set opaque-LSA body fields. */
++  ospf_gr_lsa_body_set(s, oi);
++
++  /* Set length. */
++  length = stream_get_endp (s);
++  lsah->length = htons (length);
++
++  /* Now, create an OSPF LSA instance. */
++  if ((new = ospf_lsa_new ()) == NULL)
++    {
++      zlog_warn ("ospf_gr_lsa_new: ospf_lsa_new() ?");
++      stream_free (s);
++      goto out;
++    }
++  if ((new->data = ospf_lsa_data_new (length)) == NULL)
++    {
++      zlog_warn ("ospf_gr_lsa_new: ospf_lsa_data_new() ?");
++      ospf_lsa_unlock (&new);
++      new = NULL;
++      stream_free (s);
++      goto out;
++    }
++
++  new->area = area;
++
++  SET_FLAG (new->flags, OSPF_LSA_SELF);
++  memcpy (new->data, lsah, length);
++  stream_free (s);
++
++ out:
++  return new;
++}
++
++int
++ospf_gr_lsa_originate (void *arg)
++{
++  struct ospf_lsa *new;
++  struct ospf_area *area;
++  struct ospf_interface *oi = (struct ospf_interface*)arg;
++  int rc = -1;
++
++  if (!CHECK_FLAG (om->options, OSPF_GR_SHUTDOWN_IN_PROGRESS) &&
++      (oi->ospf->gr_info.gr_exit_reason == OSPF_GR_NONE)) {
++    zlog_warn ("ospf_gr_lsa_originate: ospf grace shutdown not going");
++    goto out;
++  }
++
++  if (!oi || (area = oi->area) == NULL)
++    {
++      zlog_warn ("ospf_gr_lsa_originate: Invalid argument?");
++      goto out;
++    }
++
++  /* Create new Opaque-LSA/Graceful Resatart. */
++  if ((new = ospf_gr_lsa_new (area, oi)) == NULL)
++    {
++      zlog_warn ("ospf_gr_lsa_originate: ospf_gr_lsa_new() ?");
++      goto out;
++    }
++
++  /* Update new LSA origination count. */
++  area->ospf->lsa_originate_count++;
++
++  if (oi->ospf->gr_info.gr_exit_reason  != OSPF_GR_NONE) {
++    new->data->ls_age = htons (OSPF_LSA_MAXAGE);
++  }
++  /* Install this LSA into LSDB. */
++  if (ospf_lsa_install (area->ospf, oi, new) == NULL)
++    {
++      zlog_warn ("ospf_gr_lsa_originate: ospf_lsa_install() ?");
++      ospf_lsa_unlock (&new);
++      goto out;
++    }
++  /* Flood new LSA through area. */
++  ospf_flood_through_area(area, NULL, new);
++
++
++  if (IS_DEBUG_OSPF (lsa, LSA_GENERATE))
++    {
++      char area_id[INET_ADDRSTRLEN];
++      strcpy (area_id, inet_ntoa (area->area_id));
++      zlog_debug ("LSA[Type%d:%s]: Originate Opaque-LSA/Graceful Restart: Area(%s)", new->data->type, inet_ntoa (new->data->id), area_id);
++      ospf_lsa_header_dump (new->data);
++    }
++
++
++  rc = 0;
++ out:
++  return rc;
++}
++
++static void
++ospf_gr_event_handle (enum ospf_gr_event event,
++                      struct ospf_interface *oi)
++{
++  switch (event) {
++  case RSM_GrExtend:
++  case RSM_GrIntAdjComplete:
++    oi->gr_state = RSM_GrResOK;
++    break;
++  case RSM_GrExpiry:
++    oi->gr_state = RSM_GrResNOK;
++    break;
++  case RSM_GrNbrInconsistent:
++    oi->ospf->gr_info.gr_exit_reason = OSPF_GR_TOPOLOGY_CHNAGE; /**/
++    oi->gr_state = RSM_GrResNOK;
++    break;
++  case RSM_GrNoNbr:
++    oi->gr_state = RSM_GrResNOK;
++    break;
++  default:
++    break;
++  }
++}
++/*RFC 3623 Section 2.2 When to exit graceful restart 3)*/
++static int
++ospf_gr_grace_period_expiry (struct thread *t)
++{
++  struct ospf_interface *oif;
++  struct ospf *ospf = THREAD_ARG (t);
++  struct listnode *node = NULL, *nnode = NULL;
++
++  for (ALL_LIST_ELEMENTS (ospf->oiflist, node, nnode, oif))
++    ospf_gr_event_handle(RSM_GrExpiry, oif);
++
++  ospf->gr_info.gr_exit_reason = OSPF_GR_TIMEOUT;
++  return 0;
++}
++
++static void
++ospf_gr_set_system_time (time_t store_time)
++{
++  struct timeval now;
++  time_t curr;
++  int rc = 0;
++
++  curr = time(NULL);
++
++  if (curr < store_time) {
++    now.tv_sec = store_time;
++    now.tv_usec = 0;
++    rc=settimeofday(&now, NULL);
++  }
++
++  if (rc) {
++    zlog_err("Failed to set system time in graceful restart");
++  }
++}
++
++static void
++ospf_gr_read_state_info (void)
++{
++  FILE *gr_fp;
++  int  graceful_enable = 0;
++  long int sys_time = 0;
++
++  gr_fp = fopen(config_default, "r");
++
++  if (gr_fp == NULL) {
++    zlog_info("%s: failed to open configuration file to read %s: %s\n",
++              __func__, config_default, safe_strerror (errno));
++    goto finished;
++  }
++
++  if(!feof(gr_fp)) {
++    fscanf(gr_fp, "RESTARTTIME\t%ld\n", &sys_time);
++    ospf_gr_set_system_time((time_t)sys_time);
++  }
++
++  if (!feof(gr_fp)) {
++    fscanf(gr_fp, "GRACEFULEENABLE\t%d\n", &graceful_enable);
++  }
++
++  if (!feof(gr_fp)) {
++    fscanf(gr_fp, "RESTARTRSN\t%d\n", &gr_restart_rsn);
++  }
++
++ finished:
++  if (graceful_enable) {
++    ospf_set_gr_restart();
++  }
++
++  if (gr_fp) {
++    fclose(gr_fp);
++    remove(config_default);
++  }
++
++  return;
++
++}
++
++int
++ospf_gr_is_going (void)
++{
++  if (CHECK_FLAG (om->options, OSPF_GR_RESTART_IN_PROGRESS)) {
++    return TRUE;
++  }
++  else {
++    return FALSE;
++  }
++}
++/*RFC 3623 section 2.3 Actions on exiting graceful restart */
++static int
++ospf_gr_restart_exit_action(struct ospf *ospf)
++{
++  struct listnode *node = NULL, *nnode = NULL;
++  struct ospf_lsa *lsa;
++  struct ospf_interface *oi;
++
++  for (ALL_LIST_ELEMENTS (ospf->oiflist, node, nnode, oi)) {
++    ospf_gr_lsa_originate(oi);
++    ospf_router_lsa_update_area (oi->area);
++    if(DR(oi).s_addr) {
++      ospf_network_lsa_update (oi);
++    } else {
++      lsa = oi->network_lsa_self;
++      if (lsa)
++        ospf_lsa_flush_area (lsa, oi->area);
++    }
++  }
++  gr_restart_rsn = GR_REASON_UNKNOWN;
++  return 0;
++
++}
++
++static int
++ospf_ins_restart_status(struct thread *t)
++{
++  struct ospf_master *m = THREAD_ARG (t);
++  struct ospf *ospf ;
++  struct listnode *node = NULL, *nnode = NULL;
++
++  m->restart_status_t = NULL;
++  for (ALL_LIST_ELEMENTS (m->ospf, node, nnode, ospf)) {
++    if(ospf->gr_info.gr_exit_reason <= OSPF_GR_IN_PROGRESS)
++      return 0;
++  }
++
++  ospf_unset_gr_restart();
++
++  for (ALL_LIST_ELEMENTS (m->ospf, node, nnode, ospf)) {
++    ospf_gr_restart_exit_action(ospf);
++  }
++
++  return 0;
++}
++
++static int
++ospf_gr_restart_monitor (struct thread *t)
++{
++  struct ospf *ospf = THREAD_ARG (t);
++  struct ospf_interface *oif;
++  int okcnt = 0, nokcnt = 0, cnt = 0;
++  struct listnode *node = NULL, *nnode = NULL;
++
++
++  for (ALL_LIST_ELEMENTS (ospf->oiflist, node, nnode, oif)) {
++    if(oif->gr_state == RSM_GrResNOK ) {
++      nokcnt++;
++    }
++    if(oif->gr_state == RSM_GrResOK ) {
++      okcnt++;
++    }
++    cnt++;
++  }
++
++  if (cnt == (nokcnt + okcnt))
++    {
++      ospf->gr_info.gr_status = OSPF_GR_NOT_RESTART;
++      if (cnt == okcnt)
++        {
++          ospf->gr_info.gr_exit_reason = OSPF_GR_COMPLETED;
++        }
++      if(!(om->restart_status_t))
++        om->restart_status_t =  thread_add_event(master, ospf_ins_restart_status, om, 0);
++    } else {
++    thread_add_timer (master, ospf_gr_restart_monitor,
++                      ospf, OSPF_RSM_SM_MONITOR_INTERVAL);
++  }
++  return 0;
++}
++
++void
++ospf_gr_write_state_info (int grace_enable)
++{
++  FILE *gr_fp;
++  long int sys_time;
++
++  time((time_t*)&sys_time);
++
++  gr_fp = fopen(config_default, "w");
++
++  if (gr_fp == NULL) {
++    zlog_err ("%s: failed to open configuration file to write%s: %s\n",
++              __func__, config_default, safe_strerror (errno));
++    goto finished;
++  }
++
++  fprintf(gr_fp,"RESTARTTIME\t%ld\n", sys_time); /*TBD*/
++  fprintf(gr_fp, "GRACEFULEENABLE\t%d\n", grace_enable);
++  fprintf(gr_fp, "RESTARTRSN\t%d\n", gr_restart_rsn);
++  fclose(gr_fp);
++
++ finished:
++  return;
++}
++
++static int
++ospf_gr_no_nbr_monitor (struct thread *t)
++{
++  struct ospf_interface *oi = THREAD_ARG (t);
++
++  if(!oi)
++    return 0;
++
++  if (oi->nbrs == NULL)
++    {
++      oi->gr_nonbr_monitor = NULL;
++      ospf_gr_event_handle(RSM_GrNoNbr, oi);
++    }
++  return 0;
++}
++
++static void
++ospf_gr_ism_change (struct ospf_interface *oi, int old_state)
++{
++  struct ospf *ospf;
++
++  if(!oi)
++    return;
++
++  if(oi->ospf->gr_info.gr_status == OSPF_GR_NOT_RESTART)
++    return;
++
++  if(oi->gr_state >= RSM_GrResInProgress)
++    return;
++
++  switch (oi->state) {
++  case ISM_PointToPoint:
++  case ISM_DROther:
++  case ISM_Waiting:
++    oi->gr_state = RSM_GrResInProgress;
++    oi->gr_nonbr_monitor = NULL;
++
++    if (!(oi->ospf->gr_info.gr_monitor_t)) {
++      ospf = oi->ospf;
++      oi->ospf->gr_info.gr_monitor_t= thread_add_timer (master, ospf_gr_restart_monitor,
++                                                        ospf, OSPF_RSM_SM_MONITOR_INTERVAL);
++    }
++
++    if(!(oi->gr_nonbr_monitor)) {
++      oi->gr_nonbr_monitor = thread_add_timer (master, ospf_gr_no_nbr_monitor,
++                                               oi, 2*(OSPF_IF_PARAM (oi, v_wait)));
++    }
++    break;
++  case ISM_Down:
++    if(oi->gr_state == RSM_GrResInProgress)
++      //post GR_RES_NOK
++      break;
++  default:
++    break;
++  }
++  return;
++}
++
++int
++ospf_gr_helping_nbr_count (struct ospf_interface *oi)
++{
++  struct ospf_neighbor *nbr;
++  struct route_node *rn;
++  int nbr_cnt = 0;
++
++  if (!oi) {
++    zlog_warn("Invalid Interface\n");
++    return -1;
++  }
++
++  for (rn = route_top (oi->nbrs); rn; rn = route_next (rn)) {
++    nbr = (struct ospf_neighbor *)rn->info;
++    if (nbr) {
++      if (nbr->gr_helper.helper_status == OSPF_GR_HELPING)
++        nbr_cnt++;
++    }
++  }
++  return nbr_cnt;
++}
++
++int
++ospf_gr_chk_helping (struct ospf_neighbor *nbr)
++{
++  if(!nbr)
++    return FALSE;
++
++  if (nbr->gr_helper.helper_status == OSPF_GR_HELPING)
++    return TRUE;
++  else
++    return FALSE;
++
++}
++
++static int
++ospf_gr_examine_network_lsa (struct ospf_neighbor *nbr)
++{
++  int cnt = 0, match_found = 0, match_count = 0;
++
++  struct ospf_lsa *lsa;
++  struct route_node *rn;
++  struct network_lsa *nlsa;
++  struct in_addr *routers_id;
++
++  if (!nbr)
++    return 0;
++
++  LSDB_LOOP (NETWORK_LSDB (nbr->oi->area), rn, lsa)
++    {
++      nlsa = (struct network_lsa *) lsa;
++
++      if((IPV4_ADDR_SAME (&nlsa->header.id, &nbr->oi->ospf->router_id))) {
++        routers_id = &nlsa->routers[0];
++        while(routers_id) {
++          cnt++;
++          for (rn = route_top (nbr->oi->nbrs); rn; rn = route_next (rn)) {
++            if((IPV4_ADDR_SAME (routers_id, &((struct ospf_neighbor *)rn->info)->router_id.s_addr))) {
++              match_count++;
++            }
++            if(IPV4_ADDR_SAME (routers_id, &nbr->router_id)) {
++              match_found = 1;
++            }
++          }
++          routers_id++;
++        }
++        if(cnt == match_count) {
++          return OSPF_GR_ADJ_OK;
++        }
++
++        if (!match_found) {
++          return OSPF_GR_ADJ_NOK;
++        }
++      }
++    }
++  return OSPF_GR_ADJ_INPRGRESS;
++}
++
++static int
++check_adj_pre_restart_router_lsa (struct ospf_neighbor *nbr)
++{
++  int i;
++  struct router_lsa *rlsa;
++
++  rlsa = (struct router_lsa*)nbr->oi->area->router_lsa_self;
++  for(i=0; i < rlsa->links; i++) {
++    if(rlsa->link[i].type == LSA_LINK_TYPE_POINTOPOINT) {
++      if((IPV4_ADDR_SAME (&rlsa->link[i].link_id, &nbr->router_id)))
++        return OSPF_GR_ADJ_OK;
++    }
++  }
++
++  return OSPF_GR_ADJ_NOK;
++}
++
++
++static int
++ospf_gr_examine_router_lsa(struct ospf_neighbor *nbr)
++{
++  int i;
++  struct ospf_lsa *lsa;
++  struct route_node *rn;
++  struct router_lsa *rlsa;
++
++  LSDB_LOOP (ROUTER_LSDB (nbr->oi->area), rn, lsa) {
++    rlsa = (struct router_lsa *) lsa;
++
++    if((IPV4_ADDR_SAME (&rlsa->header.adv_router, &nbr->router_id))) {
++      for(i=0; i < rlsa->links; i++) {
++        if(rlsa->link[i].type == LSA_LINK_TYPE_POINTOPOINT) {
++          if((IPV4_ADDR_SAME (&rlsa->link[i].link_id, &nbr->oi->ospf->router_id))) {
++            //adv_router should be there in in link type 1 of self originated lsa.
++            return check_adj_pre_restart_router_lsa(nbr);
++          }
++        } else if (rlsa->link[i].type == LSA_LINK_TYPE_TRANSIT &&
++                   IPV4_ADDR_SAME (&rlsa->link[i].link_data, &nbr->address.u.prefix4)) {
++          if((IPV4_ADDR_SAME (&rlsa->link[i].link_id, &(DR (nbr->oi))))) {
++            return OSPF_GR_ADJ_OK;
++          } else {
++            return OSPF_GR_ADJ_NOK;
++          }
++        }
++      }
++    }
++  }
++
++  return OSPF_GR_ADJ_OK;
++}
++/*RFC 3623 Section 2.2 When to exit graceful restart 1) and 2)*/
++static int
++ospf_gr_adjacency_consistency_check (struct thread *t)
++{
++  struct ospf_neighbor *nbr = THREAD_ARG(t);
++  struct ospf_interface *oi;
++  int ret = OSPF_GR_ADJ_OK;
++
++  if(!nbr)
++    return 0;
++
++  oi = nbr->oi;
++  /*Restarting router is DR in the oi*/
++
++  if(IPV4_ADDR_SAME (&(DR(nbr->oi)), &(nbr->oi->address->u.prefix4))) {
++
++    if (nbr->oi->area->router_lsa_self == NULL) {
++      ospf_gr_event_handle(RSM_GrNbrInconsistent, (nbr->oi));
++      return 0;
++    }
++
++    if (OSPF_GR_ADJ_OK == ospf_gr_examine_router_lsa(nbr)) {
++      ret = ospf_gr_examine_network_lsa(nbr);
++
++      if(OSPF_GR_ADJ_NOK == ret) {
++        ospf_gr_event_handle(RSM_GrNbrInconsistent, oi);
++        return 0;
++      } else if(OSPF_GR_ADJ_OK == ret) {
++        ospf_gr_event_handle(RSM_GrIntAdjComplete, oi);
++        return 0;
++      }
++    }
++  } else {
++    if (OSPF_GR_ADJ_OK == ospf_gr_examine_router_lsa(nbr)) {
++      ospf_gr_event_handle(RSM_GrIntAdjComplete, oi);
++    } else {
++      ospf_gr_event_handle(RSM_GrNbrInconsistent, oi);
++    }
++  }
++  return 0;
++}
++
++static void
++ospf_gr_nsm_change (struct ospf_neighbor *nbr, int old_state)
++{
++  if(!nbr) {
++    return;
++  }
++  switch(nbr->state) {
++  case NSM_Full:
++    if(nbr->oi->ospf->gr_info.gr_status != OSPF_GR_NOT_RESTART)
++      nbr->gr_helper.t_adja_check = thread_add_event (master, ospf_gr_adjacency_consistency_check,
++                                                      nbr, 0);
++    break;
++  default:
++    break;
++  }
++  return;
++}
++
++static int
++ospf_gr_ls_retransmit_isrefresh(struct ospf_neighbor *nbr)
++{
++  int i;
++
++  for(i = OSPF_MIN_LSA; i < OSPF_MAX_LSA; i++) {
++    if ((ospf_lsdb_count (&nbr->ls_rxmt, i)) != (ospf_lsdb_count_self (&nbr->ls_rxmt, i))) {
++      return TRUE;
++    }
++  }
++  return FALSE;
++}
++/*RFC 3623 section 3.2 Actions on exiting helper mode */
++static int
++ospf_gr_helper_exit_action (struct ospf_neighbor *nbr)
++{
++  if(!nbr)
++    return 0;
++
++  if(nbr->gr_helper.helper_t)
++    {
++      thread_cancel(nbr->gr_helper.helper_t);
++      nbr->gr_helper.helper_t = NULL;
++    }
++  nbr->gr_helper.helper_status = OSPF_GR_NOT_HELPING;
++  nbr->gr_helper.grace_period = 0;
++
++  if((nbr->gr_helper.helper_exit_rsn == OSPF_GR_TIMEOUT) ||
++     (nbr->gr_helper.helper_exit_rsn == OSPF_GR_TOPOLOGY_CHNAGE)) {
++    OSPF_NSM_EVENT_SCHEDULE (nbr, NSM_InactivityTimer);
++  }
++  else {
++    OSPF_ISM_EVENT_EXECUTE (nbr->oi, ISM_NeighborChange);
++  }
++  ospf_router_lsa_update_area (nbr->oi->area);
++  if(DR(nbr->oi).s_addr) {
++    ospf_network_lsa_update (nbr->oi);
++  }
++
++  return 0;
++}
++
++static int
++ospf_adjacency_grace_period (struct thread *t)
++{
++  struct ospf_neighbor *nbr = THREAD_ARG(t);
++  nbr->gr_helper.helper_exit_rsn = OSPF_GR_TIMEOUT;
++  nbr->gr_helper.helper_t = NULL;
++
++  ospf_gr_helper_exit_action(nbr);
++
++  return 0;
++}
++
++/*RFC 3623 section 3.1 Entering Helper mode*/
++int
++ospf_gr_hlpr_new_lsa (struct ospf_lsa *lsa)
++{
++  u_int32_t grace_period;
++  struct in_addr if_addr;
++  uint8_t reason;
++  struct ospf_neighbor *nbr;
++  struct lsa_header *lsah;
++
++  if (helper_enable == FALSE) {
++    zlog_warn ("ospf_hlpr_new_lsa: OSPF Graceful Restart Helper not enable\n");
++    return 0;
++  }
++
++  if (!lsa || !lsa->data) {
++    zlog_err ("ospf_hlpr_new_lsa: Invalid LSA\n");
++    return -1;
++  }
++
++  lsah = (struct lsa_header *) lsa->data;
++
++  if (lsah->type != OSPF_OPAQUE_LINK_LSA) {
++    zlog_warn ("ospf_hlpr_new_lsa:LSA type %s \n", ospf_link_state_id_type_msg[lsah->type].str);
++    return 0;
++  }
++
++  if (GET_OPAQUE_TYPE (ntohl (lsah->id.s_addr)) != OPAQUE_TYPE_GRACE_LSA) {
++    zlog_warn ("ospf_hlpr_new_lsa: Invalid opaque LSA\n");
++    return 0;
++  }
++
++  ospf_gr_parse_grace_lsa(lsah, &grace_period,
++                          &if_addr, &reason);
++  zlog_debug ("ospf_hlpr_new_lsa: Received LSA Grace Period %u, Interface address %s, Reason %u\n",
++              grace_period, inet_ntoa(if_addr), reason);
++
++  nbr = ospf_nbr_lookup_by_addr(lsa->oi->nbrs, &if_addr);
++  if (!nbr){
++    zlog_warn ("ospf_hlpr_new_lsa: Failed to find neigbor\n");
++    return 0;
++  }
++
++  if (nbr->gr_helper.helper_status == OSPF_GR_HELPING) {
++    zlog_warn ("ospf_hlpr_new_lsa: Helping is in progress\n");
++    return 0;
++  }
++
++
++  if(!(LS_AGE(lsa) < (int32_t)grace_period)) {
++    zlog_warn ("ospf_hlpr_new_lsa: Recieved LSA expired\n");
++    return 0;
++  }
++
++  if (nbr->state != NSM_Full) {
++    zlog_warn ("ospf_hlpr_new_lsa: Neighbor not in full state\n");
++    return 0;
++  }
++
++  if (ospf_gr_ls_retransmit_isrefresh(nbr)) {
++    zlog_warn ("ospf_hlpr_new_lsa: Network become inconsistent\n");
++    return 0;
++  }
++
++  OSPF_NSM_TIMER_OFF (nbr->t_inactivity);
++
++  nbr->gr_helper.helper_status = OSPF_GR_HELPING;
++  nbr->gr_helper.grace_period = grace_period;
++  nbr->gr_helper.helper_exit_rsn = OSPF_GR_IN_PROGRESS;
++  nbr->gr_helper.start_time = recent_relative_time ();
++  nbr->gr_helper.helper_t = thread_add_timer (master, ospf_adjacency_grace_period,
++                                              nbr, grace_period );
++
++  return 0;
++}
++
++/*RFC 3623 Section 3.2  Exiting Helper mode*/
++int
++ospf_gr_hlpr_del_lsa (struct ospf_lsa *lsa)
++{
++  u_int32_t grace_period;
++  struct in_addr if_addr;
++  uint8_t reason;
++  struct ospf_neighbor *nbr;
++  struct lsa_header *lsah;
++
++  if (!lsa || !lsa->data)
++    return 0;
++
++  lsah = (struct lsa_header *) lsa->data;
++
++  if (lsah->type != OSPF_OPAQUE_LINK_LSA)
++    return 0;
++
++  if (GET_OPAQUE_TYPE (ntohl (lsah->id.s_addr)) != OPAQUE_TYPE_GRACE_LSA)
++    return 0;
++
++  ospf_gr_parse_grace_lsa(lsah, &grace_period,
++                          &if_addr, &reason);
++  nbr = ospf_nbr_lookup_by_addr (lsa->oi->nbrs, &if_addr);
++
++  if(nbr->gr_helper.helper_status == OSPF_GR_HELPING)
++    {
++      ospf_gr_helper_exit_action(nbr);
++      nbr->gr_helper.helper_exit_rsn = OSPF_GR_COMPLETED;
++    }
++  return 0;
++}
++/*RFC 3623 sction 3.1 Exiting Helper mode
++  3) A change in link-state database contents indicates a network
++  topology change, which forces termination of a graceful
++  restart.*/
++int
++ospf_gr_check_topology_change (struct ospf_lsa *curr_lsa,
++                               struct ospf_lsa *new_lsa,
++                               struct ospf_interface *oi)
++{
++  struct ospf_neighbor *nbr;
++  struct route_node *rn;
++  struct ospf *ospf;
++  struct ospf_interface *oif;
++  struct listnode *node, *nnode;
++  int gr_exit = 0;
++
++  if((!oi) || (!new_lsa)) {
++    return 0;
++  }
++
++  ospf = oi->ospf;
++
++  if(!ospf)
++    return 0;
++
++  if ((helper_enable == FALSE) ||
++      (ospf->gr_info.gr_status != OSPF_GR_NOT_RESTART) ||
++      (ospf->gr_info.strict_lsa_check == FALSE)) {
++    zlog_warn ("ospf_gr_check_topology_change: OSPF Graceful Restart Helper/Strict LSA Check not enabled.\n");
++    return 0;
++  }
++
++  if((new_lsa->data->type < OSPF_ROUTER_LSA) ||
++     (new_lsa->data->type > OSPF_AS_NSSA_LSA)) {
++    return 0;
++  }
++
++  if(!(curr_lsa))
++    {
++      gr_exit = 1;
++    }
++  if((curr_lsa) && (new_lsa))
++    {
++      if(ospf_lsa_different(curr_lsa, new_lsa)) {
++        gr_exit = 1;
++      }
++    }
++
++  if(gr_exit) {
++    for (ALL_LIST_ELEMENTS (ospf->oiflist, node, nnode, oif)) {
++      for (rn = route_top (oif->nbrs); rn; rn = route_next (rn)) {
++        nbr = (struct ospf_neighbor *)rn->info;
++        if(nbr) {
++          if(nbr->gr_helper.helper_status == OSPF_GR_HELPING) {
++            nbr->gr_helper.helper_exit_rsn = OSPF_GR_TOPOLOGY_CHNAGE;
++            ospf_gr_helper_exit_action(nbr);
++          }
++        }
++      }
++    }
++  }
++  return 0;
++}
++
++int
++ospf_gr_init (void)
++{
++  int rc;
++
++  rc = ospf_register_opaque_functab (
++                                     OSPF_OPAQUE_LINK_LSA,
++                                     OPAQUE_TYPE_GRACE_LSA,
++                                     NULL,
++                                     NULL,
++                                     ospf_gr_ism_change, /*ospf graceful restart ism change
++                                                           hook*/
++                                     ospf_gr_nsm_change,
++                                     NULL,
++                                     NULL,
++                                     NULL,
++                                     NULL,
++                                     NULL,
++                                     NULL,
++                                     NULL,
++                                     NULL);
++
++  if (rc != 0)
++    {
++      zlog_warn ("ospf_gr_init: Failed to register functions");
++      goto out;
++    }
++  ospf_gr_read_state_info();
++  helper_enable = TRUE;
++ out:
++  return rc;
++
++}
++
++void
++ospf_chk_restart (struct ospf* ospf)
++{
++  if(!ospf)
++    return;
++  if((ospf->gr_info.gr_enable == TRUE) &&
++     (ospf->gr_info.grace_period > 0) &&
++     (ospf->gr_info.gr_status == OSPF_GR_PLANNED_RESTART) &&
++     (ospf->gr_info.gr_exit_reason ==  OSPF_GR_IN_PROGRESS) &&
++     (ospf->gr_info.gr_expiry_t == NULL)) {
++    ospf->gr_info.gr_expiry_t = thread_add_timer (master, ospf_gr_grace_period_expiry,
++                                                  ospf, ospf->gr_info.grace_period);
++    zlog_debug("Graceful Restart Expiry task is created\n");
++  }
++
++}
+diff -burN baseline/quagga-0.99.24.1/ospfd/ospf_gr.h baseline_quagga/quagga-0.99.24.1/ospfd/ospf_gr.h
+--- baseline/quagga-0.99.24.1/ospfd/ospf_gr.h   1969-12-31 18:00:00.000000000 -0600
++++ baseline_quagga/quagga-0.99.24.1/ospfd/ospf_gr.h    2016-07-25 07:20:44.725125000 -0500
+@@ -0,0 +1,153 @@
++#ifndef _ZEBRA_OSPF_GR_H
++#include <sys/time.h>
++#include <zebra.h>
++#define _ZEBRA_OSPF_GR_H
++
++#ifndef FALSE
++#define FALSE 0
++#endif
++#ifndef TRUE
++#define TRUE 1
++#endif
++
++struct ospf_lsa;
++struct ospf;
++
++enum ospf_gr_return_value {
++  OSPF_GR_ADJ_NONE,
++  OSPF_GR_ADJ_OK,
++  OSPF_GR_ADJ_INPRGRESS,
++  OSPF_GR_ADJ_NOK,
++  OSPF_GR_ADJ_MAX,
++};
++
++
++struct ospf_grace_tlv_header
++{
++  u_int16_t type;
++  u_int16_t length;   /* Value portion only, in octets */
++};
++
++#define OSPF_GRACE_TLV_HDR_SIZE                 \
++  (sizeof (struct ospf_grace_tlv_header))
++
++/*
++ * Following section defines TLV body parts.
++ *  */
++
++/* Grace Period TLV *//* Mandatory */
++#define OSPF_GRACE_TLV_GRACE_PERIOD    1
++struct ospf_grace_tlv_grace_period
++{
++  struct ospf_grace_tlv_header  header;   /* Value length is 4 octets. */
++  u_int32_t  value;
++};
++
++
++/* Graceful restart reason TLV */
++#define OSPF_GRACE_TLV_RESTART_REASON    2
++struct ospf_grace_tlv_restart_reason
++{
++  struct ospf_grace_tlv_header  header;     /* Value length is 1 octets. */
++#define GR_REASON_UNKNOWN 0
++#define GR_REASON_SOFTWARE_RESTART 1
++#define GR_REASON_SOFTWARE_RELOAD 2
++#define GR_REASON_SWTC_TO_REDUNDANT_CNTRL_PROCESSOR 3
++  u_char value;
++};
++
++/* IP interface address TLV */
++#define OSPF_GRACE_TLV_INTERFACE_ADDR   3
++struct ospf_grace_tlv_interface_addr
++{
++  struct ospf_grace_tlv_header  header;   /* Value length is 4 octets. */
++  struct in_addr value;
++};
++
++#define OSPF_GRACE_TLV_HDR_SIZE                 \
++  (sizeof (struct ospf_grace_tlv_header))
++
++#define OSPF_GRACE_TLV_BODY_SIZE(tlvh)                          \
++  (ROUNDUP (ntohs ((tlvh)->length), sizeof (u_int32_t)))
++
++#define OSPF_GRACE_TLV_SIZE(tlvh)                               \
++  (OSPF_GRACE_TLV_HDR_SIZE + OSPF_GRACE_TLV_BODY_SIZE(tlvh))
++
++#define OSPF_GRACE_TLV_HDR_TOP(lsah)                                    \
++  (struct ospf_grace_tlv_header *)((char *)(lsah) + OSPF_LSA_HEADER_SIZE)
++
++#define OSPF_GRACE_TLV_HDR_NEXT(tlvh)                                   \
++  (struct ospf_grace_tlv_header *)((char *)(tlvh) + OSPF_GRACE_TLV_SIZE(tlvh))
++
++enum ospf_gr_support {
++  OSPF_GR_SUPPORT_NONE = 1,
++  OSPF_GR_SUPPORT_PLANNED = 2,
++  OSPF_GR_SUPPORT_UNLANNED = 3,
++};
++
++enum ospf_gr_status {
++  OSPF_GR_NOT_RESTART = 1,
++  OSPF_GR_PLANNED_RESTART = 2,
++  OSPF_GR_UNPLANNED_RESTART = 3,
++};
++
++enum ospf_gr_exit_reason {
++  OSPF_GR_NONE = 1,
++  OSPF_GR_IN_PROGRESS,
++  OSPF_GR_COMPLETED,
++  OSPF_GR_TIMEOUT,
++  OSPF_GR_TOPOLOGY_CHNAGE,
++};
++
++enum ospf_gr_helpr_status {
++  OSPF_GR_NOT_HELPING = 1,
++  OSPF_GR_HELPING = 2,
++};
++
++struct ospf_gr_info {
++  int helper_enable;
++  int gr_enable;
++  int32_t grace_period;
++  int strict_lsa_check;
++  /*Graceful Restart status*/
++  int gr_status;
++  struct timeval start_time;
++  int32_t gr_exit_reason;
++  /*Monitors */
++  struct thread *gr_monitor_t;
++  struct thread *gr_expiry_t;
++};
++
++struct ospf_gr_nbr_info {
++  uint8_t helper_status;
++  struct timeval start_time;
++  uint8_t helper_exit_rsn;
++  uint32_t grace_period;
++  struct thread *helper_t;
++  struct thread *t_adja_check;
++};
++
++extern struct ospf_gr_info global_gr_info;
++extern int helper_enable;
++extern  int gr_restart_rsn;
++void
++ospf_gr_write_state_info (int grace_enable);
++
++int
++ospf_gr_init (void);
++
++void
++ospf_gr_init_helper_info (struct ospf_gr_nbr_info *helper_info);
++
++int
++ospf_gr_hlpr_new_lsa (struct ospf_lsa *lsa);
++int
++ospf_gr_hlpr_del_lsa (struct ospf_lsa *lsa);
++void
++ospf_chk_restart (struct ospf* ospf);
++void
++ospf_gr_init_global_info (struct ospf* ospf);
++int
++ospf_gr_lsa_originate (void *arg);
++#endif /*_ZEBRA_OSPF_GR_H*/
++
+diff -burN baseline/quagga-0.99.24.1/ospfd/ospf_interface.h baseline_quagga/quagga-0.99.24.1/ospfd/ospf_interface.h
+--- baseline/quagga-0.99.24.1/ospfd/ospf_interface.h    2016-07-25 07:07:59.377721000 -0500
++++ baseline_quagga/quagga-0.99.24.1/ospfd/ospf_interface.h     2016-07-26 00:35:09.811733000 -0500
+@@ -210,6 +210,11 @@
+   struct thread *t_opaque_lsa_self;     /* Type-9 Opaque-LSAs */
+ #endif /* HAVE_OPAQUE_LSA */
+
++#ifdef SUPPORT_GRACE_RESTART
++  int gr_state;
++  struct thread *gr_nonbr_monitor;
++#endif
++
+   int on_write_q;
+
+   /* Statistics fields. */
+diff -burN baseline/quagga-0.99.24.1/ospfd/ospf_ism.c baseline_quagga/quagga-0.99.24.1/ospfd/ospf_ism.c
+--- baseline/quagga-0.99.24.1/ospfd/ospf_ism.c  2016-07-25 07:07:59.379727000 -0500
++++ baseline_quagga/quagga-0.99.24.1/ospfd/ospf_ism.c   2016-07-25 05:02:43.699707000 -0500
+@@ -399,6 +399,10 @@
+ static int
+ ism_backup_seen (struct ospf_interface *oi)
+ {
++#ifdef SUPPORT_GRACE_RESTART
++       if (ospf_gr_helping_nbr_count(oi) >= 1)
++               return oi->state;
++#endif
+   return ospf_dr_election (oi);
+ }
+
+@@ -411,6 +415,10 @@
+ static int
+ ism_neighbor_change (struct ospf_interface *oi)
+ {
++#ifdef SUPPORT_GRACE_RESTART
++       if (ospf_gr_helping_nbr_count(oi) >= 1)
++               return oi->state;
++#endif
+   return ospf_dr_election (oi);
+ }
+
+diff -burN baseline/quagga-0.99.24.1/ospfd/ospf_neighbor.c baseline_quagga/quagga-0.99.24.1/ospfd/ospf_neighbor.c
+--- baseline/quagga-0.99.24.1/ospfd/ospf_neighbor.c     2016-07-25 07:07:59.389715000 -0500
++++ baseline_quagga/quagga-0.99.24.1/ospfd/ospf_neighbor.c      2016-07-25 05:09:51.306341000 -0500
+@@ -36,6 +36,7 @@
+ #include "ospfd/ospf_asbr.h"
+ #include "ospfd/ospf_lsa.h"
+ #include "ospfd/ospf_lsdb.h"
++#include "ospfd/ospf_gr.h"
+ #include "ospfd/ospf_neighbor.h"
+ #include "ospfd/ospf_nsm.h"
+ #include "ospfd/ospf_packet.h"
+@@ -96,6 +97,10 @@
+   ospf_lsdb_init (&nbr->ls_rxmt);
+   ospf_lsdb_init (&nbr->ls_req);
+
++#ifdef SUPPORT_GRACE_RESTART
++       ospf_gr_init_helper_info(&nbr->gr_helper);
++#endif
++
+   nbr->crypt_seqnum = 0;
+
+   return nbr;
+diff -burN baseline/quagga-0.99.24.1/ospfd/ospf_neighbor.h baseline_quagga/quagga-0.99.24.1/ospfd/ospf_neighbor.h
+--- baseline/quagga-0.99.24.1/ospfd/ospf_neighbor.h     2016-07-25 07:07:59.391715000 -0500
++++ baseline_quagga/quagga-0.99.24.1/ospfd/ospf_neighbor.h      2016-07-28 00:39:36.480388000 -0500
+@@ -25,6 +25,10 @@
+
+ #include <ospfd/ospf_packet.h>
+
++#ifdef SUPPORT_GRACE_RESTART
++#include "ospfd/ospf_gr.h"
++#endif
++
+ /* Neighbor Data Structure */
+ struct ospf_neighbor
+ {
+@@ -88,6 +92,11 @@
+   struct timeval ts_last_regress;   /* last regressive NSM change     */
+   const char *last_regress_str;     /* Event which last regressed NSM */
+   u_int32_t state_change;           /* NSM state change counter       */
++
++#ifdef SUPPORT_GRACE_RESTART
++       /* Graceful Restart Helper Info*/
++       struct ospf_gr_nbr_info gr_helper;
++#endif
+ };
+
+ /* Macros. */
+@@ -117,4 +126,8 @@
+                                                          struct in_addr *);
+ extern void ospf_renegotiate_optional_capabilities (struct ospf *top);
+
++int
++ospf_gr_get_helper_age (struct ospf_neighbor *nbr);
++int
++ospf_gr_get_restart_age (struct ospf *ospf);
+ #endif /* _ZEBRA_OSPF_NEIGHBOR_H */
+diff -burN baseline/quagga-0.99.24.1/ospfd/ospf_nsm.c baseline_quagga/quagga-0.99.24.1/ospfd/ospf_nsm.c
+--- baseline/quagga-0.99.24.1/ospfd/ospf_nsm.c  2016-07-25 07:07:59.393723000 -0500
++++ baseline_quagga/quagga-0.99.24.1/ospfd/ospf_nsm.c   2016-07-25 23:51:43.955147000 -0500
+@@ -49,6 +49,7 @@
+ #include "ospfd/ospf_abr.h"
+ #include "ospfd/ospf_snmp.h"
+
++
+ static void nsm_clear_adj (struct ospf_neighbor *);
+
+ /* OSPF NSM Timer functions. */
+@@ -64,7 +65,12 @@
+     zlog (NULL, LOG_DEBUG, "NSM[%s:%s]: Timer (Inactivity timer expire)",
+          IF_NAME (nbr->oi), inet_ntoa (nbr->router_id));
+
++       if (nbr->gr_helper.helper_status == OSPF_GR_NOT_HELPING) {
++               /*If router is helping the neighbor , Not required schedule
++                * inactivity event */
++               zlog_debug("Router is not  helping the neighbor\n");
+   OSPF_NSM_EVENT_SCHEDULE (nbr, NSM_InactivityTimer);
++       }
+
+   return 0;
+ }
+@@ -638,6 +644,7 @@
+           ospfTrapNbrStateChange(nbr);
+     }
+ #endif
++
+ }
+
+ static void
+diff -burN baseline/quagga-0.99.24.1/ospfd/ospf_opaque.c baseline_quagga/quagga-0.99.24.1/ospfd/ospf_opaque.c
+--- baseline/quagga-0.99.24.1/ospfd/ospf_opaque.c       2016-07-25 07:07:59.397716000 -0500
++++ baseline_quagga/quagga-0.99.24.1/ospfd/ospf_opaque.c        2016-07-28 00:26:52.760944000 -0500
+@@ -21,11 +21,6 @@
+  * 02111-1307, USA.
+  */
+
+-/***** MTYPE definitions are not reflected to "memory.h" yet. *****/
+-#define MTYPE_OSPF_OPAQUE_FUNCTAB      0
+-#define MTYPE_OPAQUE_INFO_PER_TYPE     0
+-#define MTYPE_OPAQUE_INFO_PER_ID       0
+-
+ #include <zebra.h>
+ #ifdef HAVE_OPAQUE_LSA
+
+@@ -57,6 +52,7 @@
+ #include "ospfd/ospf_route.h"
+ #include "ospfd/ospf_ase.h"
+ #include "ospfd/ospf_zebra.h"
++#include "ospfd/ospf_gr.h"
+
+ /*------------------------------------------------------------------------*
+  * Followings are initialize/terminate functions for Opaque-LSAs handling.
+@@ -73,6 +69,7 @@
+ int ospf_apiserver_enable;
+ #endif /* SUPPORT_OSPF_API */
+
++
+ static void ospf_opaque_register_vty (void);
+ static void ospf_opaque_funclist_init (void);
+ static void ospf_opaque_funclist_term (void);
+@@ -97,6 +94,11 @@
+     exit (1);
+ #endif /* SUPPORT_OSPF_API */
+
++#ifdef SUPPORT_GRACE_RESTART
++  if (ospf_gr_init() != 0)
++    exit(1);
++#endif
++
+   return;
+ }
+
+@@ -588,6 +590,41 @@
+ }
+
+ static void
++ospf_opaque_lsa_flush (struct ospf_lsa *lsa0)
++{
++  /* Delete this lsa from neighbor retransmit-list. */
++  switch (lsa0->data->type)
++    {
++    case OSPF_OPAQUE_LINK_LSA:
++    case OSPF_OPAQUE_AREA_LSA:
++      ospf_ls_retransmit_delete_nbr_area (lsa0->area, lsa0);
++      break;
++    case OSPF_OPAQUE_AS_LSA:
++      ospf_ls_retransmit_delete_nbr_as (lsa0->area->ospf, lsa0);
++      break;
++    default:
++      zlog_warn ("ospf_opaque_lsa_flush_schedule: Unexpected LSA-type(%u)", lsa0->data->type);
++      goto out;
++    }
++
++  /* Force given lsa's age to MaxAge. */
++  lsa0->data->ls_age = htons (OSPF_LSA_MAXAGE);
++
++  if (IS_DEBUG_OSPF_EVENT)
++    zlog_debug ("Schedule Type-%u Opaque-LSA to FLUSH: [opaque-type=%u, opaque-id=%x]", lsa0->data->type, GET_OPAQUE_TYPE (ntohl (lsa0->data->id.s_addr)), GET_OPAQUE_ID (ntohl (lsa0->data->id.s_addr)));
++
++  /* This lsa will be flushed and removed eventually. */
++       if( GET_OPAQUE_TYPE (ntohl (lsa0->data->id.s_addr) == OPAQUE_TYPE_GRACE_LSA) &&
++       (CHECK_FLAG (om->options, OSPF_GR_SHUTDOWN_IN_PROGRESS)))
++               goto out;
++
++  ospf_lsa_flush (lsa0->area->ospf, lsa0);
++
++out:
++  return;
++}
++
++static void
+ free_opaque_info_per_type (void *val)
+ {
+   struct opaque_info_per_type *oipt = (struct opaque_info_per_type *) val;
+@@ -602,7 +639,7 @@
+         continue;
+       if (IS_LSA_MAXAGE (lsa))
+         continue;
+-      ospf_opaque_lsa_flush_schedule (lsa);
++      ospf_opaque_lsa_flush (lsa);
+     }
+
+   /* Remove "oipt" from its owner's self-originated LSA list. */
+@@ -611,7 +648,7 @@
+     case OSPF_OPAQUE_LINK_LSA:
+       {
+         struct ospf_interface *oi = (struct ospf_interface *)(oipt->owner);
+-        listnode_delete (oi->opaque_lsa_self, oipt);
++        //listnode_delete (oi->opaque_lsa_self, oipt);
+         break;
+       }
+     case OSPF_OPAQUE_AREA_LSA:
+@@ -1550,9 +1587,16 @@
+   if (! IS_LSA_SELF (lsa))
+     {
+       new = lsa; /* Don't touch this LSA. */
++
++      if (IS_LSA_MAXAGE (new))
++        ospf_gr_hlpr_del_lsa(new);
++      else
++        ospf_gr_hlpr_new_lsa (lsa);
++
+       goto out;
+     }
+
++
+   if (IS_DEBUG_OSPF (lsa, LSA_INSTALL))
+     zlog_debug ("Install Type-%u Opaque-LSA: [opaque-type=%u, opaque-id=%x]", lsa->data->type, GET_OPAQUE_TYPE (ntohl (lsa->data->id.s_addr)), GET_OPAQUE_ID (ntohl (lsa->data->id.s_addr)));
+
+@@ -2062,6 +2106,7 @@
+   return 0;
+ }
+
++
+ void
+ ospf_opaque_lsa_flush_schedule (struct ospf_lsa *lsa0)
+ {
+@@ -2115,6 +2160,10 @@
+     zlog_debug ("Schedule Type-%u Opaque-LSA to FLUSH: [opaque-type=%u, opaque-id=%x]", lsa->data->type, GET_OPAQUE_TYPE (ntohl (lsa->data->id.s_addr)), GET_OPAQUE_ID (ntohl (lsa->data->id.s_addr)));
+
+   /* This lsa will be flushed and removed eventually. */
++       if( GET_OPAQUE_TYPE (ntohl (lsa->data->id.s_addr) == OPAQUE_TYPE_GRACE_LSA) &&
++       (CHECK_FLAG (om->options, OSPF_GR_SHUTDOWN_IN_PROGRESS)))
++               goto out;
++
+   ospf_lsa_flush (lsa0->area->ospf, lsa);
+
+ out:
+diff -burN baseline/quagga-0.99.24.1/ospfd/ospf_packet.c baseline_quagga/quagga-0.99.24.1/ospfd/ospf_packet.c
+--- baseline/quagga-0.99.24.1/ospfd/ospf_packet.c       2016-07-25 07:07:59.402709000 -0500
++++ baseline_quagga/quagga-0.99.24.1/ospfd/ospf_packet.c        2016-07-25 05:25:17.239787000 -0500
+@@ -977,6 +977,13 @@
+       return;
+     }
+
++#ifdef SUPPORT_GRACE_RESTART
++  if (ospf_gr_chk_helping(nbr))
++    {
++      return;
++    }
++#endif
++
+   if (ospf_nbr_bidirectional (&oi->ospf->router_id, hello->neighbors,
+                              size - OSPF_HELLO_MIN_SIZE))
+     {
+@@ -1090,6 +1097,14 @@
+               return;
+             }
+           break;
++#ifdef HAVE_OPAQUE_LSA
++       case OSPF_OPAQUE_LINK_LSA:
++         if (GET_OPAQUE_TYPE (ntohl (lsah->id.s_addr)) == OPAQUE_TYPE_GRACE_LSA) {
++           zlog_warn ("Packet [DD:RECV]: Skipping Grace LSA DD\n");
++           continue;
++         }
++         break;
++#endif /* HAVE_OPAQUE_LSA */
+        default:
+          break;
+         }
+diff -burN baseline/quagga-0.99.24.1/ospfd/ospf_packet.h baseline_quagga/quagga-0.99.24.1/ospfd/ospf_packet.h
+--- baseline/quagga-0.99.24.1/ospfd/ospf_packet.h       2016-07-25 07:07:59.403724000 -0500
++++ baseline_quagga/quagga-0.99.24.1/ospfd/ospf_packet.h        2016-07-25 05:26:51.394599000 -0500
+@@ -174,4 +174,10 @@
+ extern const struct message ospf_packet_type_str[];
+ extern const size_t ospf_packet_type_str_max;
+
++#ifdef SUPPORT_GRACE_RESTART
++extern int ospf_gr_check_topology_change (struct ospf_lsa *curr_lsa,
++                                                                                                                                                                 struct ospf_lsa *new_lsa,
++                                                                                                                                                                      struct ospf_interface *oi);
++#endif
++
+ #endif /* _ZEBRA_OSPF_PACKET_H */
+diff -burN baseline/quagga-0.99.24.1/ospfd/ospf_snmp.c baseline_quagga/quagga-0.99.24.1/ospfd/ospf_snmp.c
+--- baseline/quagga-0.99.24.1/ospfd/ospf_snmp.c 2016-07-25 07:07:59.411716000 -0500
++++ baseline_quagga/quagga-0.99.24.1/ospfd/ospf_snmp.c  2016-07-25 06:25:53.126367000 -0500
+@@ -67,6 +67,14 @@
+ #define OSPFMULTICASTEXTENSIONS          12
+ #define OSPFEXITOVERFLOWINTERVAL         13
+ #define OSPFDEMANDEXTENSIONS             14
++#ifdef SUPPORT_GRACE_RESTART
++#define OSPFRESTARTSUPPORT 18
++#define OSPFRESTARTINTERVAL 19
++#define OSPFRESTARTSTRICTLSACHECK 20
++#define OSPFRESTARTSTATUS 21
++#define OSPFRESTARTAGE 22
++#define OSPFRESTARTEXITREASON 23
++#endif
+
+ /* OSPF MIB ospfAreaTable. */
+ #define OSPFAREAID                       1
+diff -burN baseline/quagga-0.99.24.1/ospfd/ospf_snmp.h baseline_quagga/quagga-0.99.24.1/ospfd/ospf_snmp.h
+--- baseline/quagga-0.99.24.1/ospfd/ospf_snmp.h 2016-07-25 07:07:59.420710000 -0500
++++ baseline_quagga/quagga-0.99.24.1/ospfd/ospf_snmp.h  2016-07-25 06:26:58.115550000 -0500
+@@ -35,4 +35,8 @@
+ extern void ospfTrapNbrStateChange (struct ospf_neighbor *);
+ extern void ospfTrapVirtNbrStateChange (struct ospf_neighbor *);
+
++#ifdef SUPPORT_GRACE_RESTART
++extern void ospfTrapNbrHlprStateChange (struct ospf_neighbor *on);
++extern void ospfTrapRtrRestartStateChange (struct ospf *ospf);
++#endif
+ #endif /* _ZEBRA_OSPF_SNMP_H */
+diff -burN baseline/quagga-0.99.24.1/ospfd/ospf_vty.c baseline_quagga/quagga-0.99.24.1/ospfd/ospf_vty.c
+--- baseline/quagga-0.99.24.1/ospfd/ospf_vty.c  2016-07-25 07:07:59.427714000 -0500
++++ baseline_quagga/quagga-0.99.24.1/ospfd/ospf_vty.c   2016-07-26 00:58:29.064151000 -0500
+@@ -6410,6 +6410,108 @@
+   return CMD_SUCCESS;
+ }
+
++#ifdef SUPPORT_GRACE_RESTART
++DEFUN (ospf_graceful_restart,
++       ospf_graceful_restart_cmd,
++       "graceful-restart enable",
++       "ospf graceful-restart\n"
++       "Enabling the status\n")
++{
++  struct ospf *ospf = vty->index;
++       ospf->gr_info.gr_enable = TRUE;
++       ospf_chk_restart(ospf);
++  return CMD_SUCCESS;
++}
++DEFUN (no_ospf_graceful_restart,
++       no_ospf_graceful_restart_cmd,
++       "graceful-restart disable",
++       "ospf graceful-restart\n"
++       "disabling the status\n")
++{
++  struct ospf *ospf = vty->index;
++       ospf->gr_info.gr_enable = FALSE;
++  return CMD_SUCCESS;
++}
++DEFUN (ospf_restart_support,
++       ospf_restart_support_cmd,
++       "graceful-restart helper-enable",
++       "ospf graceful-restart\n"
++       "enabling the support\n")
++{
++       helper_enable = TRUE;
++  return CMD_SUCCESS;
++}
++DEFUN (no_ospf_restart_support,
++       no_ospf_restart_support_cmd,
++       "graceful-restart helper-disable",
++       "ospf graceful-restart\n"
++       "disabling the support\n")
++{
++       helper_enable = FALSE;
++  return CMD_SUCCESS;
++}
++DEFUN (ospf_restart_lsachecking,
++       ospf_restart_lsachecking_cmd,
++       "graceful-restart helper-strict-lsa-checking",
++       "ospf graceful-restart\n"
++       "Restart helper-strict-lsa-checking option\n")
++{
++  struct ospf *ospf = vty->index;
++       ospf->gr_info.strict_lsa_check = TRUE;
++       return CMD_SUCCESS;
++}
++DEFUN (no_ospf_restart_lsachecking,
++       no_ospf_restart_lsachecking_cmd,
++       "graceful-restart no-strict-lsa-checking",
++       "ospf graceful-restart\n"
++       "Disabling helper-strict-lsa-checking option\n")
++{
++  struct ospf *ospf = vty->index;
++  ospf->gr_info.strict_lsa_check = FALSE;
++  return CMD_SUCCESS;
++}
++DEFUN (ospf_restart_interval,
++       ospf_restart_interval_cmd,
++       "graceful-restart restart-duration <1-1800>",
++       "ospf graceful-restart\n"
++       "Restart interval time\n"
++       "seconds\n")
++{
++  struct ospf *ospf = vty->index;
++       ospf->gr_info.grace_period = strtol (argv[0], NULL, 10);
++       ospf_chk_restart(ospf);
++  return CMD_SUCCESS;
++}
++DEFUN (no_ospf_restart_interval,
++       no_ospf_restart_interval_cmd,
++       "no graceful-restart restart-duration",
++       NO_STR
++       "ospf graceful-restart\n"
++       "Restart interval time\n")
++{
++  struct ospf *ospf = vty->index;
++       ospf->gr_info.grace_period = 0;
++  return CMD_SUCCESS;
++}
++DEFUN (ospf_stop_service,
++       ospf_stop_service_cmd,
++       "stop service",
++       "stop ospf service\n")
++{
++  ospf_terminate();
++  return CMD_SUCCESS;
++}
++
++DEFUN (ospf_restart_reason,
++       ospf_restart_reason_cmd,
++       "graceful-restart reason <0-3>",
++       "graceful-restart reason\n")
++{
++  gr_restart_rsn = strtol (argv[0], NULL, 10);
++  return CMD_SUCCESS;
++}
++
++#endif
+ static void
+ config_write_stub_router (struct vty *vty, struct ospf *ospf)
+ {
+@@ -7251,6 +7353,23 @@
+         vty_out (vty, " ospf router-id %s%s",
+                  inet_ntoa (ospf->router_id_static), VTY_NEWLINE);
+
++      /* Graceful Restart enable*/
++      if (ospf->gr_info.gr_enable == TRUE) {
++        vty_out (vty, " graceful-restart enable%s", VTY_NEWLINE);
++      }
++      /* Graceful Restart helper enable*/
++      if (helper_enable == TRUE) {
++        vty_out (vty, " graceful-restart helper-enable%s", VTY_NEWLINE);
++      }
++      /* Graceful Restart strict lsa check enable*/
++      if (ospf->gr_info.strict_lsa_check == TRUE) {
++        vty_out (vty, " graceful-restart helper-strict-lsa-checking%s", VTY_NEWLINE);
++      }
++      /* Graceful Restart grace period*/
++      if (ospf->gr_info.grace_period) {
++        vty_out (vty, " graceful-restart restart-duration %d%s",
++           ospf->gr_info.grace_period, VTY_NEWLINE);
++      }
+       /* ABR type print. */
+       if (ospf->abr_type != OSPF_ABR_DEFAULT)
+         vty_out (vty, " ospf abr-type %s%s",
+@@ -7722,6 +7841,19 @@
+   install_element (OSPF_NODE, &no_ospf_neighbor_priority_cmd);
+   install_element (OSPF_NODE, &no_ospf_neighbor_poll_interval_cmd);
+
++#ifdef SUPPORT_GRACE_RESTART
++  /*Graceful-restart commands*/
++  install_element (OSPF_NODE, &ospf_graceful_restart_cmd);
++  install_element (OSPF_NODE, &no_ospf_graceful_restart_cmd);
++  install_element (OSPF_NODE, &ospf_restart_support_cmd);
++  install_element (OSPF_NODE, &no_ospf_restart_support_cmd);
++  install_element (OSPF_NODE, &ospf_restart_lsachecking_cmd);
++  install_element (OSPF_NODE, &no_ospf_restart_lsachecking_cmd);
++  install_element (OSPF_NODE, &ospf_restart_interval_cmd);
++  install_element (OSPF_NODE, &no_ospf_restart_interval_cmd);
++  install_element (OSPF_NODE, &ospf_stop_service_cmd);
++  install_element (OSPF_NODE, &ospf_restart_reason_cmd);
++#endif
+   /* Init interface related vty commands. */
+   ospf_vty_if_init ();
+
+--- baseline/quagga-0.99.24.1/lib/libospf.h     2016-07-25 07:07:59.337730000 -0500
++++ baseline_quagga/quagga-0.99.24.1/lib/libospf.h      2016-07-25 23:46:14.698254000 -0500
+@@ -88,5 +88,5 @@
+
+ #define OSPF_LSA_MAXAGE_CHECK_INTERVAL         30
+ #define OSPF_LSA_MAXAGE_REMOVE_DELAY_DEFAULT   60
+-
++#define OSPF_GR_SHUTDOWN_DELAY     1
+ #endif /* _LIBOSPFD_H */
+--- baseline/quagga-0.99.24.1/lib/memtypes.h    2016-07-25 07:07:59.343717000 -0500
++++ baseline_quagga/quagga-0.99.24.1/lib/memtypes.h     2016-07-26 00:03:21.644437000 -0500
+@@ -166,6 +166,11 @@
+   MTYPE_OSPF_IF_INFO,
+   MTYPE_OSPF_IF_PARAMS,
+   MTYPE_OSPF_MESSAGE,
++  MTYPE_OSPF_GR_IF,
++  MTYPE_OSPF_HLPR_NBR,
++  MTYPE_OSPF_OPAQUE_FUNCTAB,
++  MTYPE_OPAQUE_INFO_PER_TYPE,
++  MTYPE_OPAQUE_INFO_PER_ID,
+   MTYPE_OSPF6_TOP,
+   MTYPE_OSPF6_AREA,
+   MTYPE_OSPF6_IF,
+--- baseline/quagga-0.99.24.1/configure.ac      2016-07-25 07:07:59.328712000 -0500
++++ baseline_quagga/quagga-0.99.24.1/configure.ac       2016-08-03 04:20:32.616618000 -0500
+@@ -277,6 +277,8 @@
+   AS_HELP_STRING([--enable-pcreposix], [enable using PCRE Posix libs for regex functions]))
+ AC_ARG_ENABLE(fpm,
+   AS_HELP_STRING([--enable-fpm], [enable Forwarding Plane Manager support]))
++AC_ARG_ENABLE(gr,
++  AS_HELP_STRING([--enable-gr], [enable OSPF graceful restart  support]))
+
+ if test x"${enable_gcc_ultra_verbose}" = x"yes" ; then
+   CFLAGS="${CFLAGS} -W -Wcast-qual -Wstrict-prototypes"
+@@ -311,6 +313,11 @@
+   AC_DEFINE(HAVE_OPAQUE_LSA,,OSPF Opaque LSA)
+ fi
+
++if test "${enable_gr}" != "no"; then
++  AC_DEFINE(HAVE_OPAQUE_LSA,,OSPF Opaque LSA)
++  AC_DEFINE(SUPPORT_GRACE_RESTART,,OSPF Graceful Restart )
++fi
++
+ if test "${enable_ospf_te}" != "no"; then
+   AC_DEFINE(HAVE_OPAQUE_LSA,,OSPF Opaque LSA)
+   AC_DEFINE(HAVE_OSPF_TE,,OSPF TE)
+
 
