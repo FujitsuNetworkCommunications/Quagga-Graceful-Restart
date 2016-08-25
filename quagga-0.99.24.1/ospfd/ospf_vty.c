@@ -3001,7 +3001,7 @@ DEFUN (show_ip_ospf_interface,
 static void
 show_ip_ospf_neighbour_header (struct vty *vty)
 {
-  vty_out (vty, "%s%15s %3s %-15s %9s %-15s %-20s %5s %5s %5s%s",
+  vty_out (vty, "%s%15s %3s %-19s %9s %-15s %-20s %5s %5s %5s%s",
            VTY_NEWLINE,
            "Neighbor ID", "Pri", "State", "Dead Time",
            "Address", "Interface", "RXmtL", "RqstL", "DBsmL",
@@ -3023,14 +3023,14 @@ show_ip_ospf_neighbor_sub (struct vty *vty, struct ospf_interface *oi)
 	/* Down state is not shown. */
 	if (nbr->state != NSM_Down)
 	  {
-	    ospf_nbr_state_message (nbr, msgbuf, 16);
+	    ospf_nbr_state_message (nbr, msgbuf, 20);
 
 	    if (nbr->state == NSM_Attempt && nbr->router_id.s_addr == 0)
-	      vty_out (vty, "%-15s %3d %-15s ",
+	      vty_out (vty, "%-15s %3d %-19s ",
 		       "-", nbr->priority,
 		       msgbuf);
             else
-	      vty_out (vty, "%-15s %3d %-15s ",
+	      vty_out (vty, "%-15s %3d %-19s ",
 		       inet_ntoa (nbr->router_id), nbr->priority,
 		       msgbuf);
             

@@ -229,6 +229,8 @@ ospf_nbr_state_message (struct ospf_neighbor *nbr, char *buf, size_t size)
     state = ISM_DR;
   else if (IPV4_ADDR_SAME (&BDR (oi), &nbr->address.u.prefix4))
     state = ISM_Backup;
+  else if (oi->type == OSPF_IFTYPE_POINTOPOINT) 
+    state = ISM_PointToPoint;
   else
     state = ISM_DROther;
 
