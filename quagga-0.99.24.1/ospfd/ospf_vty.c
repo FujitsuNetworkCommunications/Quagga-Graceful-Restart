@@ -5219,6 +5219,8 @@ DEFUN (ip_ospf_hello_interval,
 
   SET_IF_PARAM (params, v_hello);
   params->v_hello = seconds;
+  UNSET_IF_PARAM (params, v_wait);
+  params->v_wait = 4*seconds;
 
   return CMD_SUCCESS;
 }
@@ -5272,6 +5274,8 @@ DEFUN (no_ip_ospf_hello_interval,
 
   UNSET_IF_PARAM (params, v_hello);
   params->v_hello = OSPF_HELLO_INTERVAL_DEFAULT;
+  UNSET_IF_PARAM (params, v_wait);
+  params->v_wait = 4*OSPF_HELLO_INTERVAL_DEFAULT;
 
   if (params != IF_DEF_PARAMS (ifp))
     {
