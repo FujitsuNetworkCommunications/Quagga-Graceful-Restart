@@ -1,0 +1,17 @@
+sonar.projectKey=sample
+sonar.projectName=sample
+sonar.projectVersion=1
+sonar.language=c++
+sonar.sources=src
+sonar.sourceEncoding=UTF-8
+sonar.tests=test
+sonar.useless-code-tracker.enabled=true
+sonar.buid-stability.url=Jenkins:http://rtx-swtl-ci.fnc.net.local/job/sample
+sonar.cxx.includeDirectories=src
+sonar.cxx.cppcheck.reportPath=cppcheck.xml
+sonar.cxx.other.reportPath=cpplint.xml
+sonar.cxx.compiler.parser=GCC
+sonar.cxx.compiler.reportPath=buildlog.txt
+sonar.cxx.xunit.reportPath=test/*-gtest.xml
+sonar.cxx.valgrind.reportPath=test/*-valgrind.xml
+sonar.cxx.coverage.reportPath=coverage.xml
