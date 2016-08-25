@@ -6107,6 +6107,18 @@ DEFUN (ospf_distance_ospf,
   if (argv[2] != NULL)
     ospf->distance_external = atoi(argv[2]);
 
+  if (ospf->new_table != NULL) {
+    ospf_route_update_admin_distance (ospf->new_table);
+  }
+  if (ospf->new_rtrs != NULL) {
+    ospf_route_update_admin_distance (ospf->new_rtrs);
+  }
+  if (ospf->old_external_route != NULL) {
+    ospf_route_update_admin_distance (ospf->old_external_route);
+  }
+
+
+
   return CMD_SUCCESS;
 }
 

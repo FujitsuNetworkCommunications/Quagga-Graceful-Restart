@@ -1047,3 +1047,25 @@ ospf_delete_discard_route (struct route_table *rt, struct prefix_ipv4 *p)
   return;
 }
 
+
+void
+ospf_route_update_admin_distance (struct route_table *rt)
+{
+  struct route_node *rn;
+  struct ospf_route *or;
+  int count = 0, counter = 0, check = 0;
+
+  /* Update the routers with new distance. */
+  for (rn = route_top (rt); rn; rn = route_next (rn))
+  {
+    if ((or = rn->info) != NULL) {
+      if (or->type == OSPF_DESTINATION_NETWORK){
+          ospf_zebra_add ((struct prefix_ipv4 *) &rn->p, or);
+      } else if (or->type == OSPF_DESTINATION_DISCARD) {
+          ospf_zebra_add_discard ((struct prefix_ipv4 *) &rn->p);
+      }
+    }
+  }
+}
+
+

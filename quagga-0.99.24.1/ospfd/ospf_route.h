@@ -162,5 +162,6 @@ extern int ospf_add_discard_route (struct route_table *, struct ospf_area *,
 extern void ospf_delete_discard_route (struct route_table *, struct prefix_ipv4 *);
 extern int ospf_route_match_same (struct route_table *, struct prefix_ipv4 *,
 				  struct ospf_route *);
+extern void ospf_route_update_admin_distance (struct route_table *);
 
 #endif /* _ZEBRA_OSPF_ROUTE_H */
