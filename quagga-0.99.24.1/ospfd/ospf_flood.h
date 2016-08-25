@@ -70,5 +70,7 @@ extern void ospf_lsa_flush (struct ospf *, struct ospf_lsa *);
 extern struct external_info *ospf_external_info_check (struct ospf_lsa *);
 
 extern void ospf_lsdb_init (struct ospf_lsdb *);
-
+#ifdef SUPPORT_GRACE_RESTART
+extern int ospf_gr_is_going (void);
+#endif
 #endif /* _ZEBRA_OSPF_FLOOD_H */

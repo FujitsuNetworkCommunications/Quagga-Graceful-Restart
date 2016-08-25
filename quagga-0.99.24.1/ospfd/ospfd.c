@@ -52,7 +52,7 @@ Software Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
 #include "ospfd/ospf_flood.h"
 #include "ospfd/ospf_route.h"
 #include "ospfd/ospf_ase.h"
-
+#include "ospfd/ospf_gr.h"
 
 
 /* OSPF process wide configuration. */
@@ -76,6 +76,19 @@ static int ospf_network_match_iface (const struct connected *,
 static void ospf_finish_final (struct ospf *);
 
 #define OSPF_EXTERNAL_LSA_ORIGINATE_DELAY 1
+
+
+void 
+ospf_set_gr_restart (void)
+{
+  SET_FLAG (om->options, OSPF_GR_RESTART_IN_PROGRESS);  
+}
+
+void 
+ospf_unset_gr_restart (void)
+{
+  UNSET_FLAG (om->options, OSPF_GR_RESTART_IN_PROGRESS);        
+}
 
 void
 ospf_router_id_update (struct ospf *ospf)
@@ -184,6 +197,9 @@ ospf_new (void)
   new->stub_router_shutdown_time = OSPF_STUB_ROUTER_UNCONFIGURED;
   new->stub_router_admin_set     = OSPF_STUB_ROUTER_ADMINISTRATIVE_UNSET;
 
+#ifdef SUPPORT_GRACE_RESTART
+ SET_FLAG (new->config, OSPF_OPAQUE_CAPABLE);
+#endif
   /* Distribute parameter init. */
   for (i = 0; i <= ZEBRA_ROUTE_MAX; i++)
     {
@@ -275,6 +291,9 @@ ospf_get ()
 #ifdef HAVE_OPAQUE_LSA
       ospf_opaque_type11_lsa_init (ospf);
 #endif /* HAVE_OPAQUE_LSA */
+#ifdef SUPPORT_GRACE_RESTART
+      ospf_gr_init_global_info(ospf);
+#endif
     }
 
   return ospf;
@@ -355,6 +374,20 @@ ospf_deferred_shutdown_check (struct ospf *ospf)
   return;
 }
 
+static int 
+ospf_deferred_gr_shutdown_timer (struct thread *t)
+{
+  struct ospf *ospf = THREAD_ARG(t);
+
+  OSPF_TIMER_OFF (ospf->t_deferred_shutdown);
+  ospf_finish_final(ospf); 
+  
+  if (listcount (om->ospf) == 0)
+    exit (0);
+        
+  return 0;  
+}
+
 /* Shut down the entire process */
 void
 ospf_terminate (void)
@@ -363,10 +396,13 @@ ospf_terminate (void)
   struct listnode *node, *nnode;
   
   /* shutdown already in progress */
-  if (CHECK_FLAG (om->options, OSPF_MASTER_SHUTDOWN))
+  if (
+#ifdef SUPPORT_GRACE_RESTART 
+      CHECK_FLAG (om->options, OSPF_GR_SHUTDOWN_IN_PROGRESS) || 
+#endif
+      CHECK_FLAG (om->options, OSPF_MASTER_SHUTDOWN))
     return;
   
-  SET_FLAG (om->options, OSPF_MASTER_SHUTDOWN);
 
   /* exit immediately if OSPF not actually running */
   if (listcount(om->ospf) == 0)
@@ -379,20 +415,56 @@ ospf_terminate (void)
    * One or more ospf_finish()'s may have deferred shutdown to a timer
    * thread
    */
+#ifdef SUPPORT_GRACE_RESTART
+  if (CHECK_FLAG (om->options, OSPF_GR_SHUTDOWN_IN_PROGRESS)) {
+    ospf_gr_write_state_info(1);
+  }
+  else 
+#endif
+    ospf_gr_write_state_info(0);
+}
+
+static void
+ospf_gr_finish (struct ospf *ospf)
+{
+  struct listnode *node, *nnode;
+  struct ospf_interface *oi;
+
+  for (ALL_LIST_ELEMENTS (ospf->oiflist, node, nnode, oi)) {
+#ifdef HAVE_OPAQUE_LSA
+    /*Originate type9 LSA*/
+    oi->ospf->gr_info.gr_exit_reason = OSPF_GR_NONE; 
+    ospf_gr_lsa_originate(oi);
+#endif /* HAVE_OPAQUE_LSA */
+  }
+  
+  OSPF_TIMER_ON (ospf->t_deferred_gr_shutdown, ospf_deferred_gr_shutdown_timer,
+                 OSPF_GR_SHUTDOWN_DELAY);
 }
 
 void
 ospf_finish (struct ospf *ospf)
 {
+
+#ifdef SUPPORT_GRACE_RESTART 
+  if (ospf->gr_info.gr_enable == TRUE) {
+    SET_FLAG (om->options, OSPF_GR_SHUTDOWN_IN_PROGRESS);
+    ospf_gr_finish(ospf);
+  }
+  else
+#endif
+    {
+      SET_FLAG (om->options, OSPF_MASTER_SHUTDOWN);
   /* let deferred shutdown decide */
   ospf_deferred_shutdown_check (ospf);
-      
+    }   
   /* if ospf_deferred_shutdown returns, then ospf_finish_final is
    * deferred to expiry of G-S timer thread. Return back up, hopefully
    * to thread scheduler.
    */
   return;
 }
+
 
 /* Final cleanup of ospf instance */
 static void

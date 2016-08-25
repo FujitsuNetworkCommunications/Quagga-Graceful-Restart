@@ -977,6 +977,13 @@ ospf_hello (struct ip *iph, struct ospf_header *ospfh,
       return;
     }
 
+#ifdef SUPPORT_GRACE_RESTART
+  if (ospf_gr_chk_helping(nbr))
+    { 
+      return;
+    }
+#endif
+
   if (ospf_nbr_bidirectional (&oi->ospf->router_id, hello->neighbors,
 			      size - OSPF_HELLO_MIN_SIZE))
     {
@@ -1090,6 +1097,14 @@ ospf_db_desc_proc (struct stream *s, struct ospf_interface *oi,
               return;
             }
           break;
+#ifdef HAVE_OPAQUE_LSA
+	case OSPF_OPAQUE_LINK_LSA:
+	  if (GET_OPAQUE_TYPE (ntohl (lsah->id.s_addr)) == OPAQUE_TYPE_GRACE_LSA) {
+	    zlog_warn ("Packet [DD:RECV]: Skipping Grace LSA DD\n");
+	    continue;
+	  }  
+	  break;
+#endif /* HAVE_OPAQUE_LSA */
 	default:
 	  break;
         }

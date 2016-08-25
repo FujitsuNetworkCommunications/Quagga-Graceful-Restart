@@ -14,13 +14,13 @@ libospf_la_SOURCES = \
 	ospf_nsm.c ospf_dump.c ospf_network.c ospf_packet.c ospf_lsa.c \
 	ospf_spf.c ospf_route.c ospf_ase.c ospf_abr.c ospf_ia.c ospf_flood.c \
 	ospf_lsdb.c ospf_asbr.c ospf_routemap.c ospf_snmp.c \
-	ospf_opaque.c ospf_te.c ospf_vty.c ospf_api.c ospf_apiserver.c
+	ospf_opaque.c ospf_te.c ospf_gr.c ospf_vty.c ospf_api.c ospf_apiserver.c
 
 ospfdheaderdir = $(pkgincludedir)/ospfd
 
 ospfdheader_HEADERS = \
 	ospf_api.h ospf_asbr.h ospf_dump.h ospf_lsa.h ospf_lsdb.h \
-	ospf_nsm.h ospf_ism.h ospf_opaque.h ospfd.h
+	ospf_nsm.h ospf_ism.h ospf_opaque.h ospf_gr.h ospfd.h
 
 noinst_HEADERS = \
 	ospf_interface.h ospf_neighbor.h ospf_network.h ospf_packet.h \

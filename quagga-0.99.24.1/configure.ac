@@ -277,6 +277,8 @@ AC_ARG_ENABLE(pcreposix,
   AS_HELP_STRING([--enable-pcreposix], [enable using PCRE Posix libs for regex functions]))
 AC_ARG_ENABLE(fpm,
   AS_HELP_STRING([--enable-fpm], [enable Forwarding Plane Manager support]))
+AC_ARG_ENABLE(gr,
+  AS_HELP_STRING([--enable-gr], [enable OSPF graceful restart  support]))
 
 if test x"${enable_gcc_ultra_verbose}" = x"yes" ; then
   CFLAGS="${CFLAGS} -W -Wcast-qual -Wstrict-prototypes"
@@ -309,6 +311,11 @@ fi
 
 if test "${enable_opaque_lsa}" != "no"; then
   AC_DEFINE(HAVE_OPAQUE_LSA,,OSPF Opaque LSA)
+fi
+
+if test "${enable_gr}" != "no"; then
+  AC_DEFINE(HAVE_OPAQUE_LSA,,OSPF Opaque LSA)
+  AC_DEFINE(SUPPORT_GRACE_RESTART,,OSPF Graceful Restart )
 fi
 
 if test "${enable_ospf_te}" != "no"; then

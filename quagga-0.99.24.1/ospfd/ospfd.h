@@ -29,6 +29,10 @@
 #include "filter.h"
 #include "log.h"
 
+#ifdef SUPPORT_GRACE_RESTART
+#include "ospfd/ospf_gr.h"
+#endif
+
 #define OSPF_VERSION            2
 
 /* VTY port number. */
@@ -76,6 +80,11 @@
 #define OSPF_LS_REFRESH_SHIFT       (60 * 15)
 #define OSPF_LS_REFRESH_JITTER      60
 
+/*ospf graceful restart states*/
+
+#define OSPF_GR_ON_GOING  1
+#define OSPF_NORMAL_START 2
+
 /* OSPF master for system wide configuration and variables. */
 struct ospf_master
 {
@@ -98,6 +107,10 @@ struct ospf_master
   /* Various OSPF global configuration. */
   u_char options;
 #define OSPF_MASTER_SHUTDOWN (1 << 0) /* deferred-shutdown */  
+#define OSPF_GR_SHUTDOWN_IN_PROGRESS (1 << 1) /*Graceful-shutdown*/
+#define OSPF_GR_RESTART_IN_PROGRESS (1 << 2) /*Graceful restart in progress*/
+
+  struct thread *restart_status_t;
 };
 
 /* OSPF instance structure. */
@@ -217,6 +230,7 @@ struct ospf
   struct thread *t_maxage_walker;       /* MaxAge LSA checking timer. */
 
   struct thread *t_deferred_shutdown;	/* deferred/stub-router shutdown timer*/
+  struct thread *t_deferred_gr_shutdown; /*Deferred shutdown after install grace lsa*/
 
   struct thread *t_write;
   struct thread *t_read;
@@ -280,6 +294,9 @@ struct ospf
   u_int32_t rx_lsa_count;
  
   struct route_table *distance_table;
+#ifdef SUPPORT_GRACE_RESTART
+  struct ospf_gr_info gr_info;
+#endif
 };
 
 /* OSPF area structure. */
@@ -405,6 +422,7 @@ struct ospf_area
   u_int32_t act_ints;		/* Active interfaces. */
   u_int32_t full_nbrs;		/* Fully adjacent neighbors. */
   u_int32_t full_vls;		/* Fully adjacent virtual neighbors. */
+	
 };
 
 /* OSPF config network structure. */
@@ -567,4 +585,7 @@ extern void ospf_snmp_init (void);
 
 extern void ospf_master_init (void);
 
+extern void ospf_set_gr_restart (void);
+
+extern void ospf_unset_gr_restart (void);
 #endif /* _ZEBRA_OSPFD_H */

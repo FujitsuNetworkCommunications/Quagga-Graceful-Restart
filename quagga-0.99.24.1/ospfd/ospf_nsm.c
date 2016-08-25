@@ -49,6 +49,7 @@
 #include "ospfd/ospf_abr.h"
 #include "ospfd/ospf_snmp.h"
 
+
 static void nsm_clear_adj (struct ospf_neighbor *);
 
 /* OSPF NSM Timer functions. */
@@ -64,7 +65,12 @@ ospf_inactivity_timer (struct thread *thread)
     zlog (NULL, LOG_DEBUG, "NSM[%s:%s]: Timer (Inactivity timer expire)",
 	  IF_NAME (nbr->oi), inet_ntoa (nbr->router_id));
 
+	if (nbr->gr_helper.helper_status == OSPF_GR_NOT_HELPING) {
+		/*If router is helping the neighbor , Not required schedule
+		 * inactivity event */
+		zlog_debug("Router is not  helping the neighbor\n");
   OSPF_NSM_EVENT_SCHEDULE (nbr, NSM_InactivityTimer);
+	}
 
   return 0;
 }
@@ -638,6 +644,7 @@ nsm_notice_state_change (struct ospf_neighbor *nbr, int next_state, int event)
           ospfTrapNbrStateChange(nbr);
     }
 #endif
+
 }
 
 static void

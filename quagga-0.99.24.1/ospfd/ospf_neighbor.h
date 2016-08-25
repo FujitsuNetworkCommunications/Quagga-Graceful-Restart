@@ -25,6 +25,10 @@
 
 #include <ospfd/ospf_packet.h>
 
+#ifdef SUPPORT_GRACE_RESTART
+#include "ospfd/ospf_gr.h"
+#endif
+
 /* Neighbor Data Structure */
 struct ospf_neighbor
 {
@@ -88,6 +92,11 @@ struct ospf_neighbor
   struct timeval ts_last_regress;   /* last regressive NSM change     */
   const char *last_regress_str;     /* Event which last regressed NSM */
   u_int32_t state_change;           /* NSM state change counter       */
+
+#ifdef SUPPORT_GRACE_RESTART
+	/* Graceful Restart Helper Info*/
+	struct ospf_gr_nbr_info gr_helper;
+#endif
 };
 
 /* Macros. */
@@ -117,4 +126,8 @@ extern struct ospf_neighbor *ospf_nbr_lookup_by_routerid (struct route_table
 							  struct in_addr *);
 extern void ospf_renegotiate_optional_capabilities (struct ospf *top);
 
+int
+ospf_gr_get_helper_age (struct ospf_neighbor *nbr);
+int
+ospf_gr_get_restart_age (struct ospf *ospf);
 #endif /* _ZEBRA_OSPF_NEIGHBOR_H */

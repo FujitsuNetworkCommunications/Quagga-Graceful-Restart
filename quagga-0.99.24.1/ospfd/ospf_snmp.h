@@ -35,4 +35,8 @@ extern void ospfTrapVirtIfStateChange (struct ospf_interface *);
 extern void ospfTrapNbrStateChange (struct ospf_neighbor *);
 extern void ospfTrapVirtNbrStateChange (struct ospf_neighbor *);
 
+#ifdef SUPPORT_GRACE_RESTART
+extern void ospfTrapNbrHlprStateChange (struct ospf_neighbor *on);
+extern void ospfTrapRtrRestartStateChange (struct ospf *ospf);
+#endif
 #endif /* _ZEBRA_OSPF_SNMP_H */

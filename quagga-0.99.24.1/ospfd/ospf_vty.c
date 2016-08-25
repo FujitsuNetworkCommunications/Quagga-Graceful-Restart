@@ -6410,6 +6410,108 @@ DEFUN (no_ospf_max_metric_router_lsa_shutdown,
   return CMD_SUCCESS;
 }
 
+#ifdef SUPPORT_GRACE_RESTART
+DEFUN (ospf_graceful_restart,
+       ospf_graceful_restart_cmd,
+       "graceful-restart enable",
+       "ospf graceful-restart\n"
+       "Enabling the status\n")
+{
+  struct ospf *ospf = vty->index;
+	ospf->gr_info.gr_enable = TRUE;
+	ospf_chk_restart(ospf);
+  return CMD_SUCCESS;
+}
+DEFUN (no_ospf_graceful_restart,
+       no_ospf_graceful_restart_cmd,
+       "graceful-restart disable",
+       "ospf graceful-restart\n"
+       "disabling the status\n")
+{
+  struct ospf *ospf = vty->index;
+	ospf->gr_info.gr_enable = FALSE;
+  return CMD_SUCCESS;
+}
+DEFUN (ospf_restart_support,
+       ospf_restart_support_cmd,
+       "graceful-restart helper-enable",
+       "ospf graceful-restart\n"
+       "enabling the support\n")
+{
+	helper_enable = TRUE;
+  return CMD_SUCCESS;
+}
+DEFUN (no_ospf_restart_support,
+       no_ospf_restart_support_cmd,
+       "graceful-restart helper-disable",
+       "ospf graceful-restart\n"
+       "disabling the support\n")
+{
+	helper_enable = FALSE;
+  return CMD_SUCCESS;
+}
+DEFUN (ospf_restart_lsachecking,
+       ospf_restart_lsachecking_cmd,
+       "graceful-restart helper-strict-lsa-checking",
+       "ospf graceful-restart\n"
+       "Restart helper-strict-lsa-checking option\n")
+{
+  struct ospf *ospf = vty->index;
+	ospf->gr_info.strict_lsa_check = TRUE;
+	return CMD_SUCCESS;
+}
+DEFUN (no_ospf_restart_lsachecking,
+       no_ospf_restart_lsachecking_cmd,
+       "graceful-restart no-strict-lsa-checking",
+       "ospf graceful-restart\n"
+       "Disabling helper-strict-lsa-checking option\n")
+{
+  struct ospf *ospf = vty->index;
+  ospf->gr_info.strict_lsa_check = FALSE;
+  return CMD_SUCCESS;
+}
+DEFUN (ospf_restart_interval,
+       ospf_restart_interval_cmd,
+       "graceful-restart restart-duration <1-1800>",
+       "ospf graceful-restart\n"
+       "Restart interval time\n"
+       "seconds\n")
+{
+  struct ospf *ospf = vty->index;
+	ospf->gr_info.grace_period = strtol (argv[0], NULL, 10);
+	ospf_chk_restart(ospf);
+  return CMD_SUCCESS;
+}
+DEFUN (no_ospf_restart_interval,
+       no_ospf_restart_interval_cmd,
+       "no graceful-restart restart-duration",
+       NO_STR
+       "ospf graceful-restart\n"
+       "Restart interval time\n")
+{
+  struct ospf *ospf = vty->index;
+	ospf->gr_info.grace_period = 0;
+  return CMD_SUCCESS;
+}
+DEFUN (ospf_stop_service,
+       ospf_stop_service_cmd,
+       "stop service",
+       "stop ospf service\n")
+{
+  ospf_terminate();
+  return CMD_SUCCESS;
+}
+
+DEFUN (ospf_restart_reason,
+       ospf_restart_reason_cmd,
+       "graceful-restart reason <0-3>",
+       "graceful-restart reason\n")
+{
+  gr_restart_rsn = strtol (argv[0], NULL, 10);
+  return CMD_SUCCESS;
+}
+
+#endif
 static void
 config_write_stub_router (struct vty *vty, struct ospf *ospf)
 {
@@ -7251,6 +7353,23 @@ ospf_config_write (struct vty *vty)
         vty_out (vty, " ospf router-id %s%s",
                  inet_ntoa (ospf->router_id_static), VTY_NEWLINE);
 
+      /* Graceful Restart enable*/
+      if (ospf->gr_info.gr_enable == TRUE) {
+        vty_out (vty, " graceful-restart enable%s", VTY_NEWLINE);
+      }
+      /* Graceful Restart helper enable*/
+      if (helper_enable == TRUE) {
+        vty_out (vty, " graceful-restart helper-enable%s", VTY_NEWLINE);
+      }
+      /* Graceful Restart strict lsa check enable*/
+      if (ospf->gr_info.strict_lsa_check == TRUE) {
+        vty_out (vty, " graceful-restart helper-strict-lsa-checking%s", VTY_NEWLINE);
+      }
+      /* Graceful Restart grace period*/
+      if (ospf->gr_info.grace_period) {
+        vty_out (vty, " graceful-restart restart-duration %d%s",
+	    ospf->gr_info.grace_period, VTY_NEWLINE);
+      }
       /* ABR type print. */
       if (ospf->abr_type != OSPF_ABR_DEFAULT)
         vty_out (vty, " ospf abr-type %s%s", 
@@ -7722,6 +7841,19 @@ ospf_vty_init (void)
   install_element (OSPF_NODE, &no_ospf_neighbor_priority_cmd);
   install_element (OSPF_NODE, &no_ospf_neighbor_poll_interval_cmd);
 
+#ifdef SUPPORT_GRACE_RESTART
+  /*Graceful-restart commands*/
+  install_element (OSPF_NODE, &ospf_graceful_restart_cmd);
+  install_element (OSPF_NODE, &no_ospf_graceful_restart_cmd);
+  install_element (OSPF_NODE, &ospf_restart_support_cmd);
+  install_element (OSPF_NODE, &no_ospf_restart_support_cmd);
+  install_element (OSPF_NODE, &ospf_restart_lsachecking_cmd);
+  install_element (OSPF_NODE, &no_ospf_restart_lsachecking_cmd);
+  install_element (OSPF_NODE, &ospf_restart_interval_cmd);
+  install_element (OSPF_NODE, &no_ospf_restart_interval_cmd);
+  install_element (OSPF_NODE, &ospf_stop_service_cmd);
+  install_element (OSPF_NODE, &ospf_restart_reason_cmd);
+#endif
   /* Init interface related vty commands. */
   ospf_vty_if_init ();
 

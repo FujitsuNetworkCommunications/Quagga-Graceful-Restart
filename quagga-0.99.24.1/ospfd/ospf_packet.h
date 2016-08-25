@@ -174,4 +174,10 @@ extern int ospf_hello_reply_timer (struct thread *);
 extern const struct message ospf_packet_type_str[];
 extern const size_t ospf_packet_type_str_max;
 
+#ifdef SUPPORT_GRACE_RESTART
+extern int ospf_gr_check_topology_change (struct ospf_lsa *curr_lsa,
+																				  struct ospf_lsa *new_lsa,
+																					struct ospf_interface *oi);
+#endif
+
 #endif /* _ZEBRA_OSPF_PACKET_H */

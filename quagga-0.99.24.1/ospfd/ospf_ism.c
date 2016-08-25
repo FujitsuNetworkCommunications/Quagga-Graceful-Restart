@@ -399,6 +399,10 @@ ism_interface_down (struct ospf_interface *oi)
 static int
 ism_backup_seen (struct ospf_interface *oi)
 {
+#ifdef SUPPORT_GRACE_RESTART
+	if (ospf_gr_helping_nbr_count(oi) >= 1)
+		return oi->state;
+#endif
   return ospf_dr_election (oi);
 }
 
@@ -411,6 +415,10 @@ ism_wait_timer (struct ospf_interface *oi)
 static int
 ism_neighbor_change (struct ospf_interface *oi)
 {
+#ifdef SUPPORT_GRACE_RESTART
+	if (ospf_gr_helping_nbr_count(oi) >= 1)
+		return oi->state;
+#endif
   return ospf_dr_election (oi);
 }
 

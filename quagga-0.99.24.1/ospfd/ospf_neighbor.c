@@ -36,6 +36,7 @@
 #include "ospfd/ospf_asbr.h"
 #include "ospfd/ospf_lsa.h"
 #include "ospfd/ospf_lsdb.h"
+#include "ospfd/ospf_gr.h"
 #include "ospfd/ospf_neighbor.h"
 #include "ospfd/ospf_nsm.h"
 #include "ospfd/ospf_packet.h"
@@ -95,6 +96,10 @@ ospf_nbr_new (struct ospf_interface *oi)
   ospf_lsdb_init (&nbr->db_sum);
   ospf_lsdb_init (&nbr->ls_rxmt);
   ospf_lsdb_init (&nbr->ls_req);
+
+#ifdef SUPPORT_GRACE_RESTART
+	ospf_gr_init_helper_info(&nbr->gr_helper);
+#endif
 
   nbr->crypt_seqnum = 0;
 

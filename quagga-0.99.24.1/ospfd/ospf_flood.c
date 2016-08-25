@@ -356,6 +356,11 @@ ospf_flood_through_interface (struct ospf_interface *oi,
 	       IF_NAME (oi), inbr ? inet_ntoa (inbr->router_id) : "NULL",
                dump_lsa_key (lsa));
 
+#ifdef SUPPORT_GRACE_RESTART
+  if (ospf_gr_is_going() && !inbr)
+    return 0;
+#endif
+
   if (!ospf_if_is_enable (oi))
     return 0;
 

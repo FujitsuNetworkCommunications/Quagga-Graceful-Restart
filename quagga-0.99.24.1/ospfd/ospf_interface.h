@@ -210,6 +210,11 @@ struct ospf_interface
   struct thread *t_opaque_lsa_self;     /* Type-9 Opaque-LSAs */
 #endif /* HAVE_OPAQUE_LSA */
 
+#ifdef SUPPORT_GRACE_RESTART
+  int gr_state;
+  struct thread *gr_nonbr_monitor;
+#endif
+
   int on_write_q;
   
   /* Statistics fields. */

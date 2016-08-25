@@ -21,11 +21,6 @@
  * 02111-1307, USA.
  */
 
-/***** MTYPE definitions are not reflected to "memory.h" yet. *****/
-#define MTYPE_OSPF_OPAQUE_FUNCTAB	0
-#define MTYPE_OPAQUE_INFO_PER_TYPE	0
-#define MTYPE_OPAQUE_INFO_PER_ID	0
-
 #include <zebra.h>
 #ifdef HAVE_OPAQUE_LSA
 
@@ -57,6 +52,7 @@
 #include "ospfd/ospf_route.h"
 #include "ospfd/ospf_ase.h"
 #include "ospfd/ospf_zebra.h"
+#include "ospfd/ospf_gr.h"
 
 /*------------------------------------------------------------------------*
  * Followings are initialize/terminate functions for Opaque-LSAs handling.
@@ -72,6 +68,7 @@ void ospf_apiserver_term (void);
 /* Init apiserver? It's disabled by default. */
 int ospf_apiserver_enable;
 #endif /* SUPPORT_OSPF_API */
+
 
 static void ospf_opaque_register_vty (void);
 static void ospf_opaque_funclist_init (void);
@@ -96,6 +93,11 @@ ospf_opaque_init (void)
   if ((ospf_apiserver_enable) && (ospf_apiserver_init () != 0))
     exit (1);
 #endif /* SUPPORT_OSPF_API */
+
+#ifdef SUPPORT_GRACE_RESTART
+  if (ospf_gr_init() != 0)
+    exit(1);
+#endif
 
   return;
 }
@@ -588,6 +590,41 @@ out:
 }
 
 static void
+ospf_opaque_lsa_flush (struct ospf_lsa *lsa0)
+{
+  /* Delete this lsa from neighbor retransmit-list. */
+  switch (lsa0->data->type)
+    {
+    case OSPF_OPAQUE_LINK_LSA:
+    case OSPF_OPAQUE_AREA_LSA:
+      ospf_ls_retransmit_delete_nbr_area (lsa0->area, lsa0);
+      break;
+    case OSPF_OPAQUE_AS_LSA:
+      ospf_ls_retransmit_delete_nbr_as (lsa0->area->ospf, lsa0);
+      break;
+    default:
+      zlog_warn ("ospf_opaque_lsa_flush_schedule: Unexpected LSA-type(%u)", lsa0->data->type);
+      goto out;
+    }
+
+  /* Force given lsa's age to MaxAge. */
+  lsa0->data->ls_age = htons (OSPF_LSA_MAXAGE);
+
+  if (IS_DEBUG_OSPF_EVENT)
+    zlog_debug ("Schedule Type-%u Opaque-LSA to FLUSH: [opaque-type=%u, opaque-id=%x]", lsa0->data->type, GET_OPAQUE_TYPE (ntohl (lsa0->data->id.s_addr)), GET_OPAQUE_ID (ntohl (lsa0->data->id.s_addr)));
+
+  /* This lsa will be flushed and removed eventually. */
+	if( GET_OPAQUE_TYPE (ntohl (lsa0->data->id.s_addr) == OPAQUE_TYPE_GRACE_LSA) &&
+	(CHECK_FLAG (om->options, OSPF_GR_SHUTDOWN_IN_PROGRESS)))
+		goto out;
+
+  ospf_lsa_flush (lsa0->area->ospf, lsa0);
+
+out:
+  return;
+}
+
+static void
 free_opaque_info_per_type (void *val)
 {
   struct opaque_info_per_type *oipt = (struct opaque_info_per_type *) val;
@@ -602,7 +639,7 @@ free_opaque_info_per_type (void *val)
         continue;
       if (IS_LSA_MAXAGE (lsa))
         continue;
-      ospf_opaque_lsa_flush_schedule (lsa);
+      ospf_opaque_lsa_flush (lsa);
     }
 
   /* Remove "oipt" from its owner's self-originated LSA list. */
@@ -611,7 +648,7 @@ free_opaque_info_per_type (void *val)
     case OSPF_OPAQUE_LINK_LSA:
       {
         struct ospf_interface *oi = (struct ospf_interface *)(oipt->owner);
-        listnode_delete (oi->opaque_lsa_self, oipt);
+        //listnode_delete (oi->opaque_lsa_self, oipt);
         break;
       }
     case OSPF_OPAQUE_AREA_LSA:
@@ -1550,9 +1587,16 @@ ospf_opaque_lsa_install (struct ospf_lsa *lsa, int rt_recalc)
   if (! IS_LSA_SELF (lsa))
     {
       new = lsa; /* Don't touch this LSA. */
+
+      if (IS_LSA_MAXAGE (new)) 
+        ospf_gr_hlpr_del_lsa(new);
+      else 
+        ospf_gr_hlpr_new_lsa (lsa);
+
       goto out;
     }
 
+	
   if (IS_DEBUG_OSPF (lsa, LSA_INSTALL))
     zlog_debug ("Install Type-%u Opaque-LSA: [opaque-type=%u, opaque-id=%x]", lsa->data->type, GET_OPAQUE_TYPE (ntohl (lsa->data->id.s_addr)), GET_OPAQUE_ID (ntohl (lsa->data->id.s_addr)));
 
@@ -2062,6 +2106,7 @@ ospf_opaque_lsa_refresh_timer (struct thread *t)
   return 0;
 }
 
+
 void
 ospf_opaque_lsa_flush_schedule (struct ospf_lsa *lsa0)
 {
@@ -2115,6 +2160,10 @@ ospf_opaque_lsa_flush_schedule (struct ospf_lsa *lsa0)
     zlog_debug ("Schedule Type-%u Opaque-LSA to FLUSH: [opaque-type=%u, opaque-id=%x]", lsa->data->type, GET_OPAQUE_TYPE (ntohl (lsa->data->id.s_addr)), GET_OPAQUE_ID (ntohl (lsa->data->id.s_addr)));
 
   /* This lsa will be flushed and removed eventually. */
+	if( GET_OPAQUE_TYPE (ntohl (lsa->data->id.s_addr) == OPAQUE_TYPE_GRACE_LSA) &&
+	(CHECK_FLAG (om->options, OSPF_GR_SHUTDOWN_IN_PROGRESS)))
+		goto out;
+
   ospf_lsa_flush (lsa0->area->ospf, lsa);
 
 out:
