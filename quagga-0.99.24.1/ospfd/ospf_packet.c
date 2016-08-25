@@ -3499,6 +3499,9 @@ ospf_hello_send (struct ospf_interface *oi)
   if (OSPF_IF_PASSIVE_STATUS (oi) == OSPF_IF_PASSIVE)
     return;
 
+  /* increment statistics. */
+  oi->hello_out++;
+
   if (oi->type == OSPF_IFTYPE_NBMA)
     {
       struct ospf_neighbor *nbr;
@@ -3552,6 +3555,10 @@ ospf_db_desc_send (struct ospf_neighbor *nbr)
   oi = nbr->oi;
   op = ospf_packet_new (oi->ifp->mtu);
 
+
+   /* increment statistics. */
+   oi->db_desc_out++;
+
   /* Prepare OSPF common header. */
   ospf_make_header (OSPF_MSG_DB_DESC, oi, op->s);
 
@@ -3590,6 +3597,9 @@ ospf_db_desc_resend (struct ospf_neighbor *nbr)
   struct ospf_interface *oi;
 
   oi = nbr->oi;
+  
+   /* increment statistics. */
+        oi->db_desc_out++;
 
   /* Add packet to the interface output queue. */
   ospf_packet_add (oi, ospf_packet_dup (nbr->last_send));
@@ -3608,6 +3618,9 @@ ospf_ls_req_send (struct ospf_neighbor *nbr)
 
   oi = nbr->oi;
   op = ospf_packet_new (oi->ifp->mtu);
+
+   /* increment statistics. */
+     oi->ls_req_out++;
 
   /* Prepare OSPF common header. */
   ospf_make_header (OSPF_MSG_LS_REQ, oi, op->s);
@@ -3829,6 +3842,9 @@ ospf_ls_upd_send (struct ospf_neighbor *nbr, struct list *update, int flag)
   
   oi = nbr->oi;
 
+   /* increment statistics. */
+     oi->ls_upd_out++;
+
   p.family = AF_INET;
   p.prefixlen = IPV4_MAX_BITLEN;
   
@@ -3916,6 +3932,9 @@ void
 ospf_ls_ack_send (struct ospf_neighbor *nbr, struct ospf_lsa *lsa)
 {
   struct ospf_interface *oi = nbr->oi;
+
+   /* increment statistics. */
+     oi->ls_ack_out++;
 
   if (listcount (oi->ls_ack_direct.ls_ack) == 0)
     oi->ls_ack_direct.dst = nbr->address.u.prefix4;
