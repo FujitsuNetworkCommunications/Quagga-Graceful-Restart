@@ -922,6 +922,10 @@ ospf_hello (struct ip *iph, struct ospf_header *ospfh,
 	     && ! CHECK_FLAG (hello->options, OSPF_OPTION_E)))
 	{
 	  zlog_warn ("NSSA-Packet-%s[Hello:RECV]: my options: %x, his options %x", inet_ntoa (ospfh->router_id), OPTIONS (oi), hello->options);
+    nbr = ospf_nbr_get (oi, ospfh, iph, &p);
+    if(nbr) {
+       OSPF_NSM_EVENT_EXECUTE (nbr, NSM_KillNbr);
+    }
 	  return;
 	}
       if (IS_DEBUG_OSPF_NSSA)
@@ -936,9 +940,13 @@ ospf_hello (struct ip *iph, struct ospf_header *ospfh,
     if (CHECK_FLAG (OPTIONS (oi), OSPF_OPTION_E) !=
 	CHECK_FLAG (hello->options, OSPF_OPTION_E))
       {
-	zlog_warn ("Packet %s [Hello:RECV]: my options: %x, his options %x",
+       zlog_warn ("Packet %s [Hello:RECV]: my options: %x, his options %x",
 		   inet_ntoa(ospfh->router_id), OPTIONS (oi), hello->options);
-	return;
+       nbr = ospf_nbr_get (oi, ospfh, iph, &p);
+       if(nbr) {
+         OSPF_NSM_EVENT_EXECUTE (nbr, NSM_KillNbr);
+       }
+	     return;
       }
   
   /* get neighbour struct */
