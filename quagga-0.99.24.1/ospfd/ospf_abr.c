@@ -688,8 +688,17 @@ ospf_abr_translate_nssa (struct ospf_area *area, struct ospf_lsa *lsa)
               inet_ntoa (old->data->id));
         }
     }
-  else
+    if (!new)
     {
+      /* Delete LSA from neighbor retransmit-list. */
+      if (old)
+        {
+          if (IS_DEBUG_OSPF_NSSA)
+            zlog_debug ("%s(): Cleanup stale type-5 LSA Id %s from neighbor "
+                        "retransmission list",
+                        __func__, inet_ntoa (lsa->data->id));
+          ospf_ls_retransmit_delete_nbr_as (area->ospf, old);
+        }
       /* no existing external route for this LSA Id
        * originate translated LSA 
        */
